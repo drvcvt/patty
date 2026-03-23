@@ -9,7 +9,7 @@
 namespace patty {
 
 ProcessProvider::~ProcessProvider() {
-    if (m_handle && m_handle != INVALID_HANDLE_VALUE) {
+    if (m_owning && m_handle && m_handle != INVALID_HANDLE_VALUE) {
         CloseHandle(m_handle);
         m_handle = nullptr;
     }
@@ -19,27 +19,45 @@ ProcessProvider::ProcessProvider(ProcessProvider&& other) noexcept
     : m_handle(other.m_handle)
     , m_pid(other.m_pid)
     , m_is64bit(other.m_is64bit)
+    , m_owning(other.m_owning)
     , m_cached_regions(std::move(other.m_cached_regions))
     , m_regions_valid(other.m_regions_valid) {
     other.m_handle = nullptr;
     other.m_pid = 0;
+    other.m_owning = true;
     other.m_regions_valid = false;
 }
 
 ProcessProvider& ProcessProvider::operator=(ProcessProvider&& other) noexcept {
     if (this != &other) {
-        if (m_handle && m_handle != INVALID_HANDLE_VALUE)
+        if (m_owning && m_handle && m_handle != INVALID_HANDLE_VALUE)
             CloseHandle(m_handle);
         m_handle = other.m_handle;
         m_pid = other.m_pid;
         m_is64bit = other.m_is64bit;
+        m_owning = other.m_owning;
         m_cached_regions = std::move(other.m_cached_regions);
         m_regions_valid = other.m_regions_valid;
         other.m_handle = nullptr;
         other.m_pid = 0;
+        other.m_owning = true;
         other.m_regions_valid = false;
     }
     return *this;
+}
+
+ProcessProvider ProcessProvider::fromHandle(HANDLE handle, bool owning) {
+    ProcessProvider provider;
+    provider.m_handle = handle;
+    provider.m_owning = owning;
+    provider.m_pid = GetProcessId(handle);
+
+    BOOL isWow64 = FALSE;
+    if (IsWow64Process(handle, &isWow64)) {
+        provider.m_is64bit = !isWow64;
+    }
+
+    return provider;
 }
 
 std::optional<ProcessProvider> ProcessProvider::open(uint32_t pid) {
