@@ -22,6 +22,7 @@ public:
 
     static std::optional<ProcessProvider> open(uint32_t pid);
     static std::optional<ProcessProvider> openByName(const std::string& name);
+    static ProcessProvider fromHandle(HANDLE handle, bool owning = false);
     static std::vector<uint32_t> findPIDs(const std::string& name);
 
     bool read(uintptr_t address, void* buffer, size_t size) override;
@@ -42,6 +43,7 @@ private:
     HANDLE m_handle = nullptr;
     uint32_t m_pid = 0;
     bool m_is64bit = true;
+    bool m_owning = true;
 
     // Cached regions (invalidated on re-query)
     mutable std::vector<MemoryRegion> m_cached_regions;

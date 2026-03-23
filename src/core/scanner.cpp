@@ -1,6 +1,8 @@
 #include "patty/core/scanner.h"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <thread>
 #include <mutex>
@@ -382,6 +384,157 @@ ScanResult Scanner::scanData(const Pattern& pattern) {
 
 ScanResult Scanner::scanModule(const Pattern& pattern, const std::string& module) {
     return scan(pattern, ScanConfig::forModule(module));
+}
+
+// --- Value / pointer scanning ---
+
+ScanResult Scanner::scanForValue(uint64_t value, size_t value_size, const ScanConfig& config) {
+    std::vector<PatternByte> pb(value_size);
+    auto* bytes = reinterpret_cast<const uint8_t*>(&value);
+    for (size_t i = 0; i < value_size; ++i)
+        pb[i] = {bytes[i], false};
+
+    Pattern pattern;
+    pattern.name = "value_scan";
+    pattern.bytes = std::move(pb);
+    return scan(pattern, config);
+}
+
+ScanResult Scanner::scanForPointer(uintptr_t target, const ScanConfig& config) {
+    return scanForValue(static_cast<uint64_t>(target),
+                        m_provider->is64Bit() ? 8 : 4, config);
+}
+
+MultiScanResult Scanner::scanForPointers(std::span<const uintptr_t> targets,
+                                          const ScanConfig& config) {
+    size_t ptr_size = m_provider->is64Bit() ? 8 : 4;
+    std::vector<Pattern> patterns;
+    patterns.reserve(targets.size());
+
+    for (size_t i = 0; i < targets.size(); ++i) {
+        std::vector<PatternByte> pb(ptr_size);
+        auto* bytes = reinterpret_cast<const uint8_t*>(&targets[i]);
+        for (size_t j = 0; j < ptr_size; ++j)
+            pb[j] = {bytes[j], false};
+
+        Pattern p;
+        p.name = "ptr_" + std::to_string(i);
+        p.bytes = std::move(pb);
+        patterns.push_back(std::move(p));
+    }
+
+    return scan(std::span<const Pattern>(patterns), config);
+}
+
+// --- Object probing ---
+
+ProbeResult Scanner::probeObject(uintptr_t address, size_t max_size) {
+    ProbeResult result;
+    result.address = address;
+
+    size_t step = m_provider->is64Bit() ? 8 : 4;
+    result.probed_size = max_size;
+
+    std::vector<uint8_t> obj(max_size);
+    if (!m_provider->read(address, obj.data(), max_size)) {
+        result.probed_size = 0;
+        return result;
+    }
+
+    auto regions = m_provider->regions();
+
+    auto isInRegion = [&](uintptr_t addr) -> bool {
+        for (const auto& r : regions)
+            if (addr >= r.base && addr < r.end())
+                return true;
+        return false;
+    };
+
+    for (size_t off = 0; off + step <= max_size; off += step) {
+        uint64_t raw = 0;
+        std::memcpy(&raw, obj.data() + off, step);
+
+        ProbeField field;
+        field.offset = off;
+        field.raw_value = raw;
+
+        if (raw == 0) {
+            field.classification = "zero";
+            result.fields.push_back(std::move(field));
+            continue;
+        }
+
+        auto ptr = static_cast<uintptr_t>(raw);
+
+        if (ptr < 0x10000 || (m_provider->is64Bit() && ptr > 0x7FFFFFFFFFFF)) {
+            if (raw <= 0xFFFFFF) {
+                field.classification = "small_int";
+                field.detail = std::to_string(raw);
+            } else {
+                float f;
+                std::memcpy(&f, &raw, 4);
+                if (std::isfinite(f) && f != 0.0f && std::abs(f) > 1e-10f && std::abs(f) < 1e15f) {
+                    field.classification = "float";
+                    field.detail = std::to_string(f);
+                } else {
+                    field.classification = "unknown";
+                }
+            }
+            result.fields.push_back(std::move(field));
+            continue;
+        }
+
+        if (!isInRegion(ptr)) {
+            field.classification = "unknown";
+            result.fields.push_back(std::move(field));
+            continue;
+        }
+
+        // Check if it points to a vtable (pointer to array of pointers to executable memory)
+        uintptr_t first_entry = 0;
+        if (m_provider->read(ptr, &first_entry, step) && isInRegion(first_entry)) {
+            for (const auto& r : regions) {
+                if (first_entry >= r.base && first_entry < r.end() && r.isExecutable()) {
+                    field.classification = "vtable";
+                    field.detail = "-> 0x" + ([&]{
+                        char buf[20]; snprintf(buf, sizeof(buf), "%llX", (unsigned long long)ptr);
+                        return std::string(buf);
+                    })();
+                    break;
+                }
+            }
+        }
+
+        if (field.classification.empty()) {
+            // Check if it points to readable ASCII
+            char str_buf[64] = {};
+            if (m_provider->read(ptr, str_buf, sizeof(str_buf) - 1)) {
+                size_t slen = 0;
+                bool is_ascii = true;
+                for (size_t i = 0; i < sizeof(str_buf) - 1; ++i) {
+                    if (str_buf[i] == '\0') break;
+                    if (str_buf[i] < 0x20 || str_buf[i] > 0x7E) { is_ascii = false; break; }
+                    ++slen;
+                }
+                if (is_ascii && slen >= 2) {
+                    field.classification = "string_ptr";
+                    field.detail = std::string(str_buf, slen);
+                } else {
+                    field.classification = "pointer";
+                    field.detail = "-> 0x" + ([&]{
+                        char buf[20]; snprintf(buf, sizeof(buf), "%llX", (unsigned long long)ptr);
+                        return std::string(buf);
+                    })();
+                }
+            } else {
+                field.classification = "pointer";
+            }
+        }
+
+        result.fields.push_back(std::move(field));
+    }
+
+    return result;
 }
 
 } // namespace patty

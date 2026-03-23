@@ -52,6 +52,14 @@ public:
     ScanResult scanData(const Pattern& pattern);
     ScanResult scanModule(const Pattern& pattern, const std::string& module);
 
+    // Scan for a specific pointer/value in memory
+    ScanResult scanForValue(uint64_t value, size_t value_size, const ScanConfig& config = {});
+    ScanResult scanForPointer(uintptr_t target, const ScanConfig& config = {});
+    MultiScanResult scanForPointers(std::span<const uintptr_t> targets, const ScanConfig& config = {});
+
+    // Probe an object's memory layout, classifying each pointer-sized field
+    ProbeResult probeObject(uintptr_t address, size_t max_size = 0x400);
+
     std::shared_ptr<IMemoryProvider> provider() const { return m_provider; }
 
 private:

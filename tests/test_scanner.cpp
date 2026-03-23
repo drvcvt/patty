@@ -146,3 +146,76 @@ TEST_F(ScannerTest, EmptyBuffer) {
 
     EXPECT_TRUE(result.matches.empty());
 }
+
+TEST_F(ScannerTest, ScanForValue) {
+    // Place a known 64-bit value in the buffer
+    std::vector<uint8_t> buf(4096, 0);
+    uint64_t target = 0xDEADBEEFCAFEBABE;
+    memcpy(buf.data() + 0x200, &target, 8);
+    memcpy(buf.data() + 0x800, &target, 8);
+
+    auto provider = std::make_shared<BufferProvider>(std::move(buf), 0x10000);
+    Scanner scanner(provider);
+
+    auto result = scanner.scanForValue(target, 8);
+    ASSERT_EQ(result.matches.size(), 2);
+    EXPECT_EQ(result.matches[0].address, 0x10200);
+    EXPECT_EQ(result.matches[1].address, 0x10800);
+}
+
+TEST_F(ScannerTest, ScanForPointer) {
+    std::vector<uint8_t> buf(4096, 0);
+    uintptr_t ptr = 0x00007FF612340000;
+    memcpy(buf.data() + 0x100, &ptr, 8);
+
+    auto provider = std::make_shared<BufferProvider>(std::move(buf), 0x10000);
+    Scanner scanner(provider);
+
+    auto result = scanner.scanForPointer(ptr);
+    ASSERT_EQ(result.matches.size(), 1);
+    EXPECT_EQ(result.matches[0].address, 0x10100);
+}
+
+TEST_F(ScannerTest, ScanForPointersBatch) {
+    std::vector<uint8_t> buf(4096, 0);
+    uintptr_t ptr1 = 0xAAAAAAAAAAAAAAAA;
+    uintptr_t ptr2 = 0xBBBBBBBBBBBBBBBB;
+    memcpy(buf.data() + 0x100, &ptr1, 8);
+    memcpy(buf.data() + 0x200, &ptr2, 8);
+
+    auto provider = std::make_shared<BufferProvider>(std::move(buf), 0x10000);
+    Scanner scanner(provider);
+
+    std::vector<uintptr_t> targets = {ptr1, ptr2, 0xCCCCCCCCCCCCCCCC};
+    auto result = scanner.scanForPointers(std::span(targets));
+    ASSERT_EQ(result.results.size(), 3);
+    EXPECT_EQ(result.results[0].matches.size(), 1);
+    EXPECT_EQ(result.results[1].matches.size(), 1);
+    EXPECT_EQ(result.results[2].matches.size(), 0);
+}
+
+TEST_F(ScannerTest, ProbeObject) {
+    std::vector<uint8_t> buf(0x1000, 0);
+    uintptr_t base = 0x10000;
+
+    // offset 0x00: zero
+    // offset 0x08: small int (42)
+    uint64_t small = 42;
+    memcpy(buf.data() + 0x08, &small, 8);
+    // offset 0x10: pointer to 0x10500 (valid region, points to ASCII)
+    uintptr_t str_ptr = base + 0x500;
+    memcpy(buf.data() + 0x10, &str_ptr, 8);
+    // Place a string at 0x500
+    const char* hello = "Hello World";
+    memcpy(buf.data() + 0x500, hello, strlen(hello) + 1);
+
+    auto provider = std::make_shared<BufferProvider>(std::move(buf), base);
+    Scanner scanner(provider);
+
+    auto probe = scanner.probeObject(base, 0x20);
+    ASSERT_EQ(probe.fields.size(), 4); // 0x00, 0x08, 0x10, 0x18
+    EXPECT_EQ(probe.fields[0].classification, "zero");
+    EXPECT_EQ(probe.fields[1].classification, "small_int");
+    EXPECT_EQ(probe.fields[2].classification, "string_ptr");
+    EXPECT_EQ(probe.fields[2].detail, "Hello World");
+}

@@ -30,4 +30,17 @@ struct MultiScanResult {
     size_t total_bytes_scanned = 0;
 };
 
+struct ProbeField {
+    size_t offset = 0;
+    uint64_t raw_value = 0;
+    std::string classification;     // "pointer", "string_ptr", "vtable", "float", "small_int", "zero", "unknown"
+    std::string detail;             // dereferenced string content, float value, etc.
+};
+
+struct ProbeResult {
+    uintptr_t address = 0;
+    size_t probed_size = 0;
+    std::vector<ProbeField> fields;
+};
+
 } // namespace patty
