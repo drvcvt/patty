@@ -7,69 +7,82 @@ Fast, universal memory pattern scanner. Scans live Windows processes and binary 
 ## Architecture
 
 ```mermaid
-graph TB
-    subgraph CLI["CLI · patty"]
-        scan["scan"]
-        list["list"]
-        dump["dump"]
+graph LR
+    subgraph Interface["User Interface"]
+        direction TB
+        MCP["MCP Server\n(FastMCP)"]
+        CLI["CLI\nscan · list · dump"]
+        LIB["C++ Library\n#include patty/patty.h"]
     end
 
-    subgraph MCP["MCP Server · Claude Code"]
-        mcp_scan["scan_process"]
-        mcp_file["scan_file"]
-        mcp_multi["multi_scan"]
-        mcp_list["list_regions"]
-        mcp_str["find_string"]
+    MCP -- "subprocess\n(JSON)" --> CLI
+    CLI --> Scanner
+    LIB --> Scanner
+
+    subgraph Engine["Scanner Engine"]
+        direction TB
+        Scanner["Scanner"]
+        Scanner -- "compile()" --> CP["CompiledPattern\nvalues[] · mask[]"]
+        Scanner -- "memchr + match" --> Results["ScanResult\nMatches[]"]
+        Scanner -- "per match" --> Resolve["Resolve Chain\nRIP-rel · deref · add"]
+        Resolve --> Results
     end
 
-    subgraph Core["Scanner Engine"]
-        scanner["Scanner"]
-        pattern["Pattern"]
-        compiled["CompiledPattern"]
-        match["Match / ScanResult"]
+    subgraph Input["Input"]
+        direction TB
+        Pattern["Pattern\nAOB · IDA · string · SSO"]
+        Profile["TargetProfile\n(JSON)"] -- "contains" --> Pattern
     end
 
-    subgraph Providers["Memory Providers"]
-        iface["IMemoryProvider"]
-        proc["ProcessProvider"]
-        file["FileProvider"]
-        buf["BufferProvider"]
+    subgraph Memory["Memory Providers"]
+        direction TB
+        IMP["IMemoryProvider"]
+        IMP --> Proc["ProcessProvider\n(live process)"]
+        IMP --> File["FileProvider\n(PE · ELF · raw)"]
+        IMP --> Buf["BufferProvider\n(in-memory)"]
     end
 
-    subgraph Resolve["Resolution"]
-        rip["RIP-relative"]
-        deref["Dereference"]
-        chain["Pointer Chain"]
-    end
+    Pattern --> Scanner
+    Memory --> Scanner
 
-    subgraph Profiles["Target Profiles"]
-        profile["TargetProfile"]
-        loader["JSON Loader"]
-    end
-
-    CLI --> Core
-    MCP --> CLI
-    Core --> Providers
-    Core --> Resolve
-    Profiles --> Core
-    pattern --> compiled
-    scanner --> match
-    iface --> proc
-    iface --> file
-    iface --> buf
+    style Engine fill:#1a1a2e,stroke:#e94560,color:#fff
+    style Memory fill:#1a1a2e,stroke:#0f3460,color:#fff
+    style Input fill:#1a1a2e,stroke:#16213e,color:#fff
+    style Interface fill:#1a1a2e,stroke:#533483,color:#fff
 ```
 
-## Scan Flow
+## Scan Pipeline
 
 ```mermaid
 flowchart LR
-    A["Pattern\n'48 8B 05 ?? ?? ?? ??'"] --> B["compile()"]
-    B --> C["CompiledPattern\nvalues[] + mask[]"]
-    C --> D["memchr\nfind first byte"]
-    D --> E{"match?"}
-    E -->|yes| F["resolve chain\nRIP / deref / add"]
-    E -->|no| D
-    F --> G["Match\naddress + resolved"]
+    subgraph Input
+        P["Pattern\n48 8B 05 ?? ?? ?? ??"]
+        M["Memory\nProvider.regions()"]
+    end
+
+    subgraph Compile
+        C["compile()\nvalues[] + mask[]\nfirst_fixed byte"]
+    end
+
+    subgraph Scan["Scan Loop (per chunk)"]
+        MC["memchr()\njump to next\ncandidate"]
+        MA{"mask\nmatch?"}
+        MC --> MA
+        MA -- "no" --> MC
+    end
+
+    subgraph Post["Post-Processing"]
+        R["Resolve Chain\n① RIP-relative\n② dereference\n③ add offset"]
+        F["MatchFilter\ncallback"]
+    end
+
+    P --> C --> MC
+    M -- "2 MB chunks\n+ overlap" --> MC
+    MA -- "yes" --> R --> F
+    F --> O["ScanResult\naddress · resolved\nregion · timing"]
+
+    style Scan fill:#16213e,stroke:#e94560,color:#fff
+    style Post fill:#16213e,stroke:#0f3460,color:#fff
 ```
 
 ## Build
