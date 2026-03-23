@@ -203,6 +203,34 @@ auto result2 = scanner2.scan(pattern, patty::ScanConfig::codeOnly());
 std::vector<patty::Pattern> patterns = { pattern1, pattern2, pattern3 };
 auto multi = scanner.scan(std::span(patterns));
 
+// Scan with validation filter — only keep matches where resolved value > 0x10000
+auto filtered = scanner.scan(pattern, config, [&](const patty::Match& m) {
+    auto val = provider->read<uintptr_t>(m.resolved);
+    return val && *val > 0x10000;
+});
+
+// Reverse pointer search — find all pointers to a known address
+auto xrefs = scanner.scanForPointer(0x7FF612340000, patty::ScanConfig::dataOnly());
+
+// Batch pointer search — single pass for N targets
+std::vector<uintptr_t> targets = { addr1, addr2, addr3 };
+auto batch = scanner.scanForPointers(std::span(targets));
+
+// Probe an object's memory layout
+auto probe = scanner.probeObject(obj_addr, 0x200);
+for (const auto& f : probe.fields)
+    printf("+0x%X: %s %s\n", f.offset, f.classification.c_str(), f.detail.c_str());
+
+// String patterns
+auto str_pat = patty::Pattern::fromString("TaskScheduler");
+auto sso_pat = patty::Pattern::fromSSOString("PlayerName");
+
+// Wrap an existing process handle (non-owning)
+auto prov = patty::ProcessProvider::fromHandle(my_handle, false);
+
+// Build regions without memorizing Windows PAGE_* constants
+auto region = patty::MemoryRegion::make(0x1000, 0x2000, true, true, false, ".data");
+
 // Pointer chain resolution
 auto addr = patty::resolve::pointerChain(*provider, base, {0x10, 0x08, 0x00});
 ```
@@ -253,6 +281,8 @@ Set `PATTY_EXE` environment variable if the patty binary isn't in a default buil
 | AOB | `48 8B 05 ?? ?? ?? ??` | Space-separated hex bytes, `??` for wildcards |
 | IDA | `48 8B 05 ? ? ? ?` | Same as AOB, single `?` per wildcard |
 | Byte+Mask | `\x48\x8B\x05...` + `xxx????` | Raw bytes with mask string |
+| String | `"TaskScheduler"` | Raw ASCII bytes via `Pattern::fromString()` |
+| SSO String | `"Hello"` | Matches MSVC x64 `std::string` SSO layout (32 bytes) via `Pattern::fromSSOString()` |
 
 ## Performance
 
