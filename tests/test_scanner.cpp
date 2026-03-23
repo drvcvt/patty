@@ -219,3 +219,75 @@ TEST_F(ScannerTest, ProbeObject) {
     EXPECT_EQ(probe.fields[2].classification, "string_ptr");
     EXPECT_EQ(probe.fields[2].detail, "Hello World");
 }
+
+TEST_F(ScannerTest, ScanWithFilter) {
+    auto buf = makeTestBuffer();
+    auto provider = std::make_shared<BufferProvider>(std::move(buf), 0x10000);
+    Scanner scanner(provider);
+
+    auto pattern = Pattern::fromAOB("48 8B 05 ?? ?? ?? ??", "filtered");
+
+    // Without filter: 2 matches
+    auto all = scanner.scan(pattern);
+    ASSERT_EQ(all.matches.size(), 2);
+
+    // With filter: only keep matches at address > 0x10150
+    auto filtered = scanner.scan(pattern, ScanConfig{}, [](const Match& m) {
+        return m.address > 0x10150;
+    });
+    ASSERT_EQ(filtered.matches.size(), 1);
+    EXPECT_EQ(filtered.matches[0].address, 0x10200);
+}
+
+TEST(PatternTest_String, FromString) {
+    auto p = Pattern::fromString("Hello", "str_test");
+    ASSERT_EQ(p.bytes.size(), 5);
+    EXPECT_EQ(p.bytes[0].value, 'H');
+    EXPECT_EQ(p.bytes[4].value, 'o');
+    EXPECT_FALSE(p.bytes[0].wildcard);
+}
+
+TEST(PatternTest_String, FromSSOStringInline) {
+    auto p = Pattern::fromSSOString("Hello", "sso_test");
+    // SSO layout: 16 bytes buffer + 8 bytes size + 8 bytes capacity = 32
+    ASSERT_EQ(p.bytes.size(), 32);
+    // First byte: 'H'
+    EXPECT_EQ(p.bytes[0].value, 'H');
+    EXPECT_FALSE(p.bytes[0].wildcard);
+    // After string + null: wildcards
+    EXPECT_TRUE(p.bytes[6].wildcard);
+    // Size at offset 16: 5 (little-endian)
+    EXPECT_EQ(p.bytes[16].value, 5);
+    EXPECT_FALSE(p.bytes[16].wildcard);
+    // Capacity at offset 24: 15 for SSO
+    EXPECT_EQ(p.bytes[24].value, 15);
+    EXPECT_FALSE(p.bytes[24].wildcard);
+}
+
+TEST(PatternTest_String, FromSSOStringHeap) {
+    std::string long_str = "This is a longer string that exceeds SSO";
+    auto p = Pattern::fromSSOString(long_str, "sso_heap");
+    ASSERT_EQ(p.bytes.size(), 32);
+    // Heap pointer: wildcards
+    EXPECT_TRUE(p.bytes[0].wildcard);
+    EXPECT_TRUE(p.bytes[7].wildcard);
+    // Size at offset 16: string length
+    EXPECT_EQ(p.bytes[16].value, static_cast<uint8_t>(long_str.size()));
+    EXPECT_FALSE(p.bytes[16].wildcard);
+    // Capacity: wildcard (unknown heap allocation)
+    EXPECT_TRUE(p.bytes[24].wildcard);
+}
+
+TEST(RegionTest, Make) {
+    auto r = MemoryRegion::make(0x1000, 0x2000, true, true, false, "test");
+    EXPECT_EQ(r.base, 0x1000);
+    EXPECT_EQ(r.size, 0x2000);
+    EXPECT_TRUE(r.isWritable());
+    EXPECT_TRUE(r.isReadable());
+    EXPECT_FALSE(r.isExecutable());
+    EXPECT_EQ(r.name, "test");
+
+    auto rx = MemoryRegion::make(0x1000, 0x100, true, false, true);
+    EXPECT_TRUE(rx.isExecutable());
+    EXPECT_FALSE(rx.isWritable());
+}

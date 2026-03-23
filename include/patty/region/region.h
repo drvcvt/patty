@@ -29,8 +29,24 @@ struct MemoryRegion {
     }
 
     bool isReadable() const {
-        // Anything except PAGE_NOACCESS (0x01) and PAGE_GUARD
         return protection != 0 && !(protection & 0x01) && !(protection & 0x100);
+    }
+
+    static MemoryRegion make(uintptr_t base, size_t size,
+                              bool r = true, bool w = false, bool x = false,
+                              const std::string& name = "") {
+        MemoryRegion reg;
+        reg.base = base;
+        reg.size = size;
+        reg.name = name;
+        uint32_t prot = 0;
+        if (x && w)      prot = 0x40; // PAGE_EXECUTE_READWRITE
+        else if (x)      prot = 0x20; // PAGE_EXECUTE_READ
+        else if (w)      prot = 0x04; // PAGE_READWRITE
+        else if (r)      prot = 0x02; // PAGE_READONLY
+        else             prot = 0x01; // PAGE_NOACCESS
+        reg.protection = prot;
+        return reg;
     }
 };
 

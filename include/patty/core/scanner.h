@@ -45,7 +45,10 @@ class Scanner {
 public:
     explicit Scanner(std::shared_ptr<IMemoryProvider> provider);
 
+    using MatchFilter = std::function<bool(const Match&)>;
+
     ScanResult scan(const Pattern& pattern, const ScanConfig& config = {});
+    ScanResult scan(const Pattern& pattern, const ScanConfig& config, MatchFilter filter);
     MultiScanResult scan(std::span<const Pattern> patterns, const ScanConfig& config = {});
 
     ScanResult scanCode(const Pattern& pattern);
