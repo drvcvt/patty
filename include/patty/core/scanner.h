@@ -1,0 +1,77 @@
+#pragma once
+
+#include "pattern.h"
+#include "match.h"
+#include "../memory/provider.h"
+#include "../region/filter.h"
+#include "../resolve/rip_relative.h"
+#include "../resolve/pointer_chain.h"
+
+#include <memory>
+#include <vector>
+#include <functional>
+#include <span>
+#include <chrono>
+
+namespace patty {
+
+struct ScanConfig {
+    size_t chunk_size = 0x200000;   // 2MB chunks
+    size_t max_results = 0;         // 0 = unlimited
+    RegionFilter filter;            // Region filter
+    bool parallel = false;          // Multi-threaded scanning
+    size_t thread_count = 0;        // 0 = hardware_concurrency
+
+    static ScanConfig codeOnly() {
+        ScanConfig c;
+        c.filter = RegionFilter::codeOnly();
+        return c;
+    }
+
+    static ScanConfig dataOnly() {
+        ScanConfig c;
+        c.filter = RegionFilter::dataOnly();
+        return c;
+    }
+
+    static ScanConfig forModule(const std::string& name) {
+        ScanConfig c;
+        c.filter = RegionFilter::forModule(name);
+        return c;
+    }
+};
+
+class Scanner {
+public:
+    explicit Scanner(std::shared_ptr<IMemoryProvider> provider);
+
+    ScanResult scan(const Pattern& pattern, const ScanConfig& config = {});
+    MultiScanResult scan(std::span<const Pattern> patterns, const ScanConfig& config = {});
+
+    ScanResult scanCode(const Pattern& pattern);
+    ScanResult scanData(const Pattern& pattern);
+    ScanResult scanModule(const Pattern& pattern, const std::string& module);
+
+    std::shared_ptr<IMemoryProvider> provider() const { return m_provider; }
+
+private:
+    std::shared_ptr<IMemoryProvider> m_provider;
+
+    void scanBuffer(const uint8_t* data, size_t size, uintptr_t base_addr,
+                    const Pattern& pattern, const MemoryRegion& region,
+                    std::vector<Match>& results, size_t max_results);
+
+    void scanBufferMulti(const uint8_t* data, size_t size, uintptr_t base_addr,
+                         std::span<const Pattern> patterns,
+                         const std::vector<MemoryRegion>& region_for_each,
+                         std::vector<std::vector<Match>>& results,
+                         size_t max_results);
+
+    uintptr_t resolveMatch(uintptr_t addr, const Pattern& pattern);
+
+    std::vector<Match> scanRegions(const Pattern& pattern,
+                                    const std::vector<MemoryRegion>& regions,
+                                    const ScanConfig& config);
+};
+
+} // namespace patty

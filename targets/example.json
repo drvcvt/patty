@@ -1,0 +1,36 @@
+{
+  "name": "Example Target",
+  "version": "1.0",
+  "description": "Example target profile demonstrating pattern definitions",
+  "module": "target.exe",
+  "patterns": [
+    {
+      "name": "GlobalManager",
+      "aob": "48 8B 05 ?? ?? ?? ?? 48 85 C0 74",
+      "result_offset": 3,
+      "resolve": ["rip_relative"],
+      "description": "Global manager singleton pointer"
+    },
+    {
+      "name": "EntityList",
+      "aob": "4C 8B 25 ?? ?? ?? ?? 4D 85 E4",
+      "result_offset": 3,
+      "resolve": ["rip_relative", "dereference"],
+      "description": "Entity list head pointer (double deref)"
+    },
+    {
+      "name": "InitFunction",
+      "aob": "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20",
+      "result_offset": 0,
+      "resolve": [],
+      "description": "Common function prologue pattern"
+    },
+    {
+      "name": "VersionString",
+      "aob": "76 31 2E",
+      "result_offset": 0,
+      "resolve": [],
+      "description": "ASCII 'v1.' — find version strings"
+    }
+  ]
+}
