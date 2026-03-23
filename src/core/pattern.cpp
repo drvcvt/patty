@@ -1,6 +1,7 @@
 #include "patty/core/pattern.h"
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <sstream>
 
 namespace patty {
@@ -75,6 +76,66 @@ Pattern Pattern::fromByteMask(std::span<const uint8_t> bytes,
         } else {
             p.bytes.push_back({bytes[i], false});
         }
+    }
+
+    return p;
+}
+
+Pattern Pattern::fromString(std::string_view str, std::string_view name) {
+    Pattern p;
+    p.name = name;
+    p.bytes.reserve(str.size());
+    for (char c : str)
+        p.bytes.push_back({static_cast<uint8_t>(c), false});
+    return p;
+}
+
+Pattern Pattern::fromSSOString(std::string_view str, std::string_view name) {
+    // MSVC x64 std::string SSO layout (32 bytes):
+    //   [0..15]  inline buffer OR pointer to heap (if len >= 16)
+    //   [16..23] size (uint64_t)
+    //   [24..31] capacity (uint64_t)
+    // If len < 16: data is inline in [0..15], capacity = 15
+    // If len >= 16: [0..7] = heap pointer (wildcard), rest follows
+
+    Pattern p;
+    p.name = name;
+
+    uint64_t len = str.size();
+
+    if (len < 16) {
+        // SSO inline: match the string bytes, wildcard the rest of the buffer
+        for (size_t i = 0; i < 16; ++i) {
+            if (i < len)
+                p.bytes.push_back({static_cast<uint8_t>(str[i]), false});
+            else if (i == len)
+                p.bytes.push_back({0x00, false}); // null terminator
+            else
+                p.bytes.push_back({0, true});
+        }
+    } else {
+        // Heap-allocated: pointer is unknown, wildcard it
+        for (size_t i = 0; i < 8; ++i)
+            p.bytes.push_back({0, true});
+        // Pad to 16 bytes (unused inline buffer area)
+        for (size_t i = 0; i < 8; ++i)
+            p.bytes.push_back({0, true});
+    }
+
+    // Size field (8 bytes, little-endian)
+    auto* len_bytes = reinterpret_cast<const uint8_t*>(&len);
+    for (size_t i = 0; i < 8; ++i)
+        p.bytes.push_back({len_bytes[i], false});
+
+    // Capacity field: for SSO it's 15, for heap it's unknown
+    if (len < 16) {
+        uint64_t cap = 15;
+        auto* cap_bytes = reinterpret_cast<const uint8_t*>(&cap);
+        for (size_t i = 0; i < 8; ++i)
+            p.bytes.push_back({cap_bytes[i], false});
+    } else {
+        for (size_t i = 0; i < 8; ++i)
+            p.bytes.push_back({0, true});
     }
 
     return p;

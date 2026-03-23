@@ -53,6 +53,8 @@ public:
     static Pattern fromByteMask(std::span<const uint8_t> bytes,
                                  std::string_view mask,
                                  std::string_view name = "");
+    static Pattern fromString(std::string_view str, std::string_view name = "");
+    static Pattern fromSSOString(std::string_view str, std::string_view name = "");
 
     bool isValid() const;
     size_t size() const { return bytes.size(); }

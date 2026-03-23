@@ -311,6 +311,20 @@ ScanResult Scanner::scan(const Pattern& pattern, const ScanConfig& config) {
     return result;
 }
 
+ScanResult Scanner::scan(const Pattern& pattern, const ScanConfig& config, MatchFilter filter) {
+    auto result = scan(pattern, config);
+    if (filter) {
+        std::vector<Match> kept;
+        kept.reserve(result.matches.size());
+        for (auto& m : result.matches) {
+            if (filter(m))
+                kept.push_back(std::move(m));
+        }
+        result.matches = std::move(kept);
+    }
+    return result;
+}
+
 MultiScanResult Scanner::scan(std::span<const Pattern> patterns, const ScanConfig& config) {
     auto start = std::chrono::high_resolution_clock::now();
 
@@ -321,36 +335,85 @@ MultiScanResult Scanner::scan(std::span<const Pattern> patterns, const ScanConfi
     for (const auto& r : filtered)
         total_bytes += r.size;
 
-    // Pre-allocate reusable buffer
     size_t max_overlap = 0;
     for (const auto& p : patterns)
         max_overlap = std::max(max_overlap, p.bytes.size());
     const size_t buf_size = config.chunk_size + max_overlap;
-    std::vector<uint8_t> buffer(buf_size);
 
-    // For multi-pattern: scan each region once, checking all patterns
     std::vector<std::vector<Match>> per_pattern_matches(patterns.size());
 
-    for (const auto& region : filtered) {
-        const size_t chunk_size = config.chunk_size;
+    if (config.parallel && filtered.size() > 1) {
+        std::mutex mutex;
+        size_t n_threads = config.thread_count > 0
+            ? config.thread_count
+            : std::thread::hardware_concurrency();
+        if (n_threads == 0) n_threads = 4;
+        n_threads = std::min(n_threads, filtered.size());
 
-        size_t offset = 0;
-        while (offset < region.size) {
-            size_t read_size = std::min(chunk_size + max_overlap, region.size - offset);
+        std::vector<std::jthread> threads;
+        std::atomic<size_t> next_region{0};
 
-            if (read_size > buffer.size())
-                buffer.resize(read_size);
+        for (size_t t = 0; t < n_threads; ++t) {
+            threads.emplace_back([&]() {
+                std::vector<uint8_t> thread_buffer(buf_size);
+                std::vector<std::vector<Match>> thread_matches(patterns.size());
 
-            if (!m_provider->read(region.base + offset, buffer.data(), read_size)) {
-                offset += chunk_size;
-                continue;
+                while (true) {
+                    size_t idx = next_region.fetch_add(1);
+                    if (idx >= filtered.size()) break;
+
+                    const auto& region = filtered[idx];
+                    size_t offset = 0;
+                    while (offset < region.size) {
+                        size_t read_size = std::min(config.chunk_size + max_overlap,
+                                                     region.size - offset);
+                        if (read_size > thread_buffer.size())
+                            thread_buffer.resize(read_size);
+
+                        if (!m_provider->read(region.base + offset,
+                                               thread_buffer.data(), read_size)) {
+                            offset += config.chunk_size;
+                            continue;
+                        }
+
+                        std::vector<MemoryRegion> rv = {region};
+                        scanBufferMulti(thread_buffer.data(), read_size,
+                                       region.base + offset, patterns, rv,
+                                       thread_matches, config.max_results);
+                        offset += config.chunk_size;
+                    }
+                }
+
+                std::lock_guard lock(mutex);
+                for (size_t i = 0; i < patterns.size(); ++i) {
+                    per_pattern_matches[i].insert(
+                        per_pattern_matches[i].end(),
+                        std::make_move_iterator(thread_matches[i].begin()),
+                        std::make_move_iterator(thread_matches[i].end()));
+                }
+            });
+        }
+    } else {
+        std::vector<uint8_t> buffer(buf_size);
+
+        for (const auto& region : filtered) {
+            size_t offset = 0;
+            while (offset < region.size) {
+                size_t read_size = std::min(config.chunk_size + max_overlap,
+                                             region.size - offset);
+                if (read_size > buffer.size())
+                    buffer.resize(read_size);
+
+                if (!m_provider->read(region.base + offset, buffer.data(), read_size)) {
+                    offset += config.chunk_size;
+                    continue;
+                }
+
+                std::vector<MemoryRegion> region_vec = {region};
+                scanBufferMulti(buffer.data(), read_size, region.base + offset,
+                               patterns, region_vec, per_pattern_matches, config.max_results);
+                offset += config.chunk_size;
             }
-
-            std::vector<MemoryRegion> region_vec = {region};
-            scanBufferMulti(buffer.data(), read_size, region.base + offset,
-                           patterns, region_vec, per_pattern_matches, config.max_results);
-
-            offset += chunk_size;
         }
     }
 
