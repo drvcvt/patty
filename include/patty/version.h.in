@@ -1,0 +1,17 @@
+#pragma once
+
+#include <string_view>
+
+#define PATTY_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
+#define PATTY_VERSION_MINOR @PROJECT_VERSION_MINOR@
+#define PATTY_VERSION_PATCH @PROJECT_VERSION_PATCH@
+#define PATTY_VERSION_STRING "@PROJECT_VERSION@"
+
+namespace patty {
+
+inline constexpr int version_major = PATTY_VERSION_MAJOR;
+inline constexpr int version_minor = PATTY_VERSION_MINOR;
+inline constexpr int version_patch = PATTY_VERSION_PATCH;
+inline constexpr std::string_view version_string = PATTY_VERSION_STRING;
+
+} // namespace patty

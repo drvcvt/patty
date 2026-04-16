@@ -34,6 +34,10 @@ static TargetProfile parseProfile(const json& j) {
                 pattern = Pattern::fromAOB(pj["aob"].get<std::string>());
             } else if (pj.contains("ida")) {
                 pattern = Pattern::fromIDA(pj["ida"].get<std::string>());
+            } else if (pj.contains("string")) {
+                pattern = Pattern::fromString(pj["string"].get<std::string>());
+            } else if (pj.contains("sso_string")) {
+                pattern = Pattern::fromSSOString(pj["sso_string"].get<std::string>());
             } else {
                 continue; // Skip patterns without bytes
             }

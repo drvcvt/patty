@@ -69,20 +69,23 @@ private:
     std::shared_ptr<IMemoryProvider> m_provider;
 
     void scanBuffer(const uint8_t* data, size_t size, uintptr_t base_addr,
-                    const Pattern& pattern, const MemoryRegion& region,
-                    std::vector<Match>& results, size_t max_results);
+                    const Pattern& pattern, const CompiledPattern& compiled,
+                    const MemoryRegion& region, std::vector<Match>& results,
+                    size_t max_results);
 
     void scanBufferMulti(const uint8_t* data, size_t size, uintptr_t base_addr,
                          std::span<const Pattern> patterns,
-                         const std::vector<MemoryRegion>& region_for_each,
+                         std::span<const CompiledPattern> compiled_patterns,
+                         const MemoryRegion& region,
                          std::vector<std::vector<Match>>& results,
                          size_t max_results);
 
     uintptr_t resolveMatch(uintptr_t addr, const Pattern& pattern);
+    static void dedupeAndCapMatches(std::vector<Match>& matches, size_t max_results);
 
     std::vector<Match> scanRegions(const Pattern& pattern,
-                                    const std::vector<MemoryRegion>& regions,
-                                    const ScanConfig& config);
+                                   const std::vector<MemoryRegion>& regions,
+                                   const ScanConfig& config);
 };
 
 } // namespace patty

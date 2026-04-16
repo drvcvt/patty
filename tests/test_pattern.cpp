@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <patty/core/pattern.h>
+#include <patty/target/loader.h>
 
 using namespace patty;
 
@@ -98,4 +99,37 @@ TEST(PatternTest, CaseInsensitiveHex) {
     for (size_t i = 0; i < p1.bytes.size(); ++i) {
         EXPECT_EQ(p1.bytes[i].value, p2.bytes[i].value);
     }
+}
+
+
+TEST(ProfileLoaderTest, ParsesStringPatternFromJson) {
+    auto profile = ProfileLoader::fromJSON(R"JSON({
+        "name": "strings",
+        "patterns": [
+            {"name": "literal", "string": "PlayerName"}
+        ]
+    })JSON");
+
+    ASSERT_TRUE(profile.has_value());
+    ASSERT_EQ(profile->patterns.size(), 1);
+    EXPECT_EQ(profile->patterns[0].name, "literal");
+    ASSERT_EQ(profile->patterns[0].bytes.size(), 10);
+    EXPECT_EQ(profile->patterns[0].bytes[0].value, 'P');
+    EXPECT_FALSE(profile->patterns[0].bytes[0].wildcard);
+}
+
+TEST(ProfileLoaderTest, ParsesSsoStringPatternFromJson) {
+    auto profile = ProfileLoader::fromJSON(R"JSON({
+        "name": "strings",
+        "patterns": [
+            {"name": "literal", "sso_string": "Hello"}
+        ]
+    })JSON");
+
+    ASSERT_TRUE(profile.has_value());
+    ASSERT_EQ(profile->patterns.size(), 1);
+    EXPECT_EQ(profile->patterns[0].name, "literal");
+    ASSERT_EQ(profile->patterns[0].bytes.size(), 32);
+    EXPECT_EQ(profile->patterns[0].bytes[0].value, 'H');
+    EXPECT_FALSE(profile->patterns[0].bytes[0].wildcard);
 }

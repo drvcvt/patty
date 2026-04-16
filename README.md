@@ -1,6 +1,6 @@
 # patty
 
-Fast, universal memory pattern scanner. Scans live Windows processes and binary files for byte patterns (AOB signatures) with automatic RIP-relative resolution, pointer chain following, and PE/ELF section parsing.
+Fast, universal memory pattern scanner. patty ships as both an installable C++ library and a standalone CLI, while the MCP server stays a thin adapter over the same engine/CLI surface. It scans live Windows processes and binary files for byte patterns (AOB signatures) with automatic RIP-relative resolution, pointer chain following, and PE/ELF section parsing.
 
 ~580 MB/s scan throughput on x86-64. Scans a full process address space in under 2 seconds.
 
@@ -12,7 +12,7 @@ graph LR
         direction TB
         MCP["MCP Server\n(FastMCP)"]
         CLI["CLI\nscan · list · dump"]
-        LIB["C++ Library\n#include patty/patty.h"]
+        LIB["C++ Library\nfind_package(patty)\n#include patty/patty.h"]
     end
 
     MCP -- "subprocess\n(JSON)" --> CLI
@@ -90,27 +90,56 @@ flowchart LR
 Requires C++20, CMake 3.20+, and a C++ compiler (GCC, Clang, or MSVC).
 
 ```bash
-mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-cmake --build .
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
 ```
 
-Dependencies (fetched automatically via CMake FetchContent):
+### Common CMake options
+
+| Option | Default | Purpose |
+|--------|---------|---------|
+| `BUILD_SHARED_LIBS` | `OFF` | Build `patty` as a shared library instead of a static library |
+| `PATTY_BUILD_CLI` | `ON` | Build/install the standalone `patty` executable |
+| `PATTY_BUILD_TESTS` | `ON` | Build the GoogleTest suite |
+
+Dependencies are resolved via `find_package(...)` first and fall back to `FetchContent` when needed:
 - [nlohmann/json](https://github.com/nlohmann/json) — JSON profile loading
 - [CLI11](https://github.com/CLIUtils/CLI11) — CLI argument parsing
-- [GoogleTest](https://github.com/google/googletest) — tests (optional, `-DPATTY_BUILD_TESTS=OFF` to skip)
+- [GoogleTest](https://github.com/google/googletest) — tests (optional)
+
+### Install
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+cmake --install build --prefix ./out/install
+```
+
+This installs:
+- `bin/patty` (CLI, when `PATTY_BUILD_CLI=ON`)
+- `include/patty/...` (public headers, including generated `version.h`)
+- `lib/patty.lib` / `lib/libpatty.a` / shared library artifacts
+- `lib/cmake/patty/pattyConfig.cmake` and exported targets for downstream CMake consumers
 
 ## CLI Usage
 
 ```bash
-# Scan a binary file for a pattern
+# Scan a binary file for an AOB pattern
 patty scan --file target.exe --pattern "48 8B 05 ?? ?? ?? ??" --code-only
 
-# Scan with RIP-relative resolution
-patty scan --file target.exe --pattern "48 8D 0D ?? ?? ?? ??" --resolve rip --max 10
+# Scan with RIP-relative resolution and custom scan tuning
+patty scan --file target.exe --pattern "48 8D 0D ?? ?? ?? ??" --resolve rip --max 10 --parallel --threads 4
 
-# Scan a live process
-patty scan --name game.exe --pattern "48 8B 05 ?? ?? ?? ??" --code-only
+# Scan for an exact ASCII string
+patty scan --name game.exe --string "TaskScheduler" --data-only
+
+# Scan for a numeric value or pointer-sized address
+patty scan-value --file dump.bin --value 0x1122334455667788 --size 8 --output json
+patty scan-pointer --name game.exe --address 0x7FF612340000 --output json
+patty scan-pointers --name game.exe --address 0x7FF612340000 --address 0x7FF612341000 --parallel
+
+# Probe an object / region layout
+patty probe --name game.exe --address 0x7FF612340000 --size 0x200 --output json
 
 # Scan with a target profile (multiple patterns at once)
 patty scan --name game.exe --profile targets/myprofile.json --output json
@@ -119,11 +148,30 @@ patty scan --name game.exe --profile targets/myprofile.json --output json
 patty list --name explorer.exe
 patty list --file target.exe
 
-# Dump a memory region
+# Dump a memory region (Windows live-process only)
 patty dump --name game.exe --region 7FF6A0010000 --size 4096 --output region.bin
 ```
 
+### Shared scan flags
+
+Most scan commands share the same execution controls:
+
+- `--code-only` / `--data-only`
+- `--module <name>`
+- `--max <n>`
+- `--parallel`
+- `--threads <n>`
+- `--chunk-size <bytes>`
+- `--output table|json`
+
+Dedicated commands expose the same tuning surface where it makes sense (`scan`, `scan-value`, `scan-pointer`, `scan-pointers`).
+
 ### Output Formats
+
+JSON output is now explicitly versioned with `schema_version: 1` for the CLI machine contract.
+For `scan*` commands the top-level object keeps `results`, `elapsed_ms`, and `bytes_scanned`, and adds `schema_version` + `command`.
+For `probe`, the top-level object is `{"schema_version", "command", "address", "probed_size", "fields"}`.
+For `list`, the CLI now returns `{"schema_version", "command", "regions": [...]}`; the MCP `list_regions` tool preserves its legacy bare-array response for compatibility.
 
 **Table** (default):
 ```
@@ -179,8 +227,23 @@ Define scan targets as JSON files with multiple patterns:
 
 ## Library Usage
 
+### CMake package consumption
+
+After installing patty, downstream CMake projects can link it via the exported package:
+
+```cmake
+find_package(patty CONFIG REQUIRED)
+
+add_executable(my_tool main.cpp)
+target_link_libraries(my_tool PRIVATE patty::patty)
+```
+
+For build-tree consumption during local development, point `patty_DIR` at `<build-dir>/cmake`.
+
 ```cpp
 #include <patty/patty.h>
+
+printf("patty %.*s\n", static_cast<int>(patty::version_string.size()), patty::version_string.data());
 
 // Scan a file
 auto file = patty::FileProvider::open("target.exe");
@@ -237,7 +300,7 @@ auto addr = patty::resolve::pointerChain(*provider, base, {0x10, 0x08, 0x00});
 
 ## MCP Server
 
-The `mcp/` directory contains a [FastMCP](https://gofastmcp.com) server that exposes patty as MCP tools for Claude Code or any MCP-compatible client.
+The `mcp/` directory contains a [FastMCP](https://gofastmcp.com) server that exposes patty as MCP tools for Claude Code or any MCP-compatible client. Today the server shells out to the `patty` CLI, so keeping the CLI installed (or pointing `PATTY_EXE` at a build-tree binary) is the recommended standalone + MCP setup.
 
 ### Setup
 
@@ -258,7 +321,7 @@ Add to your `.mcp.json` (project-level) or `~/.claude.json` (global):
 }
 ```
 
-Set `PATTY_EXE` environment variable if the patty binary isn't in a default build directory.
+Set `PATTY_EXE` environment variable if the patty binary isn't in a default build directory. A local install prefix keeps CLI + MCP usage stable without depending on repo-relative build folders.
 
 ### Available Tools
 
@@ -268,6 +331,10 @@ Set `PATTY_EXE` environment variable if the patty binary isn't in a default buil
 | `scan_process_by_pid` | Scan a live process by PID |
 | `scan_file` | Scan a binary file |
 | `scan_with_profile` | Scan using a JSON target profile |
+| `scan_value` | Scan a process/file for an exact numeric value |
+| `scan_pointer` | Scan a process/file for one pointer-sized address |
+| `scan_pointers` | Scan a process/file for multiple pointer-sized addresses |
+| `probe_object` | Probe an object/region layout and classify fields |
 | `list_regions` | List memory regions |
 | `dump_memory` | Dump a memory region to file |
 | `multi_scan_process` | Multi-pattern scan on a process |

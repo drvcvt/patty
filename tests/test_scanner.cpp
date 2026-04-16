@@ -1,4 +1,6 @@
 #include <gtest/gtest.h>
+#include <algorithm>
+#include <cstring>
 #include <patty/core/scanner.h>
 #include <patty/memory/buffer.h>
 
@@ -37,6 +39,41 @@ protected:
 
         return buf;
     }
+};
+
+class SegmentedProvider : public IMemoryProvider {
+public:
+    struct Segment {
+        MemoryRegion region;
+        std::vector<uint8_t> data;
+    };
+
+    explicit SegmentedProvider(std::vector<Segment> segments)
+        : m_segments(std::move(segments)) {}
+
+    bool read(uintptr_t address, void* buffer, size_t size) override {
+        for (const auto& segment : m_segments) {
+            if (address < segment.region.base || address + size > segment.region.end())
+                continue;
+            const auto offset = static_cast<size_t>(address - segment.region.base);
+            std::memcpy(buffer, segment.data.data() + offset, size);
+            return true;
+        }
+        return false;
+    }
+
+    std::vector<MemoryRegion> regions() override {
+        std::vector<MemoryRegion> regions;
+        regions.reserve(m_segments.size());
+        for (const auto& segment : m_segments)
+            regions.push_back(segment.region);
+        return regions;
+    }
+
+    bool is64Bit() const override { return true; }
+
+private:
+    std::vector<Segment> m_segments;
 };
 
 TEST_F(ScannerTest, BasicScan) {
@@ -290,4 +327,57 @@ TEST(RegionTest, Make) {
     auto rx = MemoryRegion::make(0x1000, 0x100, true, false, true);
     EXPECT_TRUE(rx.isExecutable());
     EXPECT_FALSE(rx.isWritable());
+}
+
+TEST(ScannerRegressionTest, ParallelMaxResultsIsRespectedAcrossRegions) {
+    std::vector<SegmentedProvider::Segment> segments;
+    for (size_t i = 0; i < 6; ++i) {
+        auto data = std::vector<uint8_t>(0x200, 0x90);
+        data[0x10] = 0xDE;
+        data[0x11] = 0xAD;
+        data[0x12] = 0xBE;
+        data[0x13] = 0xEF;
+
+        auto base = static_cast<uintptr_t>(0x10000 + i * 0x1000);
+        auto region = MemoryRegion::make(base, data.size(), true, true, false, "seg" + std::to_string(i));
+        segments.push_back({region, std::move(data)});
+    }
+
+    auto provider = std::make_shared<SegmentedProvider>(std::move(segments));
+    Scanner scanner(provider);
+
+    ScanConfig config;
+    config.parallel = true;
+    config.thread_count = 4;
+    config.max_results = 3;
+
+    auto pattern = Pattern::fromAOB("DE AD BE EF", "parallel_cap");
+    auto result = scanner.scan(pattern, config);
+
+    ASSERT_EQ(result.matches.size(), 3);
+    EXPECT_TRUE(std::is_sorted(result.matches.begin(), result.matches.end(),
+                               [](const Match& a, const Match& b) { return a.address < b.address; }));
+}
+
+TEST(ScannerRegressionTest, MultiScanDeduplicatesChunkOverlap) {
+    std::vector<uint8_t> buf(0x300, 0xCC);
+    buf[0x100] = 0xDE;
+    buf[0x101] = 0xAD;
+    buf[0x102] = 0xBE;
+    buf[0x103] = 0xEF;
+
+    auto provider = std::make_shared<BufferProvider>(std::move(buf), 0x10000);
+    Scanner scanner(provider);
+
+    ScanConfig config;
+    config.chunk_size = 0x100;
+
+    std::vector<Pattern> patterns = {
+        Pattern::fromAOB("DE AD BE EF", "overlap")
+    };
+
+    auto result = scanner.scan(std::span<const Pattern>(patterns), config);
+    ASSERT_EQ(result.results.size(), 1);
+    ASSERT_EQ(result.results[0].matches.size(), 1);
+    EXPECT_EQ(result.results[0].matches[0].address, 0x10100);
 }
