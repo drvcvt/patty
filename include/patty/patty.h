@@ -1,5 +1,7 @@
 #pragma once
 
+#include <patty/version.h>
+
 #include "core/pattern.h"
 #include "core/scanner.h"
 #include "core/match.h"

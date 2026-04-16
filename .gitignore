@@ -16,3 +16,8 @@ compile_commands.json
 .idea/
 *.swp
 *~
+
+# Local agent/tool state
+.omc/
+.omx/
+.claude/
