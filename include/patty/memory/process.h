@@ -1,57 +1,59 @@
 #pragma once
 
-#include "provider.h"
-#include <string>
-#include <optional>
+#include "target.h"
 
-#ifdef _WIN32
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#include <tlhelp32.h>
-#endif
+#include <memory>
+#include <string>
+#include <string_view>
+#include <vector>
 
 namespace patty {
 
-#ifdef _WIN32
-
-class ProcessProvider : public IMemoryProvider {
+// A running process, opened read-only. Supported on Linux and Windows.
+//
+// Linux reads memory with process_vm_readv and nothing else: no ptrace, no
+// attach, no /proc/<pid>/mem. The process is never stopped. The kernel still
+// requires ptrace-level *permission* for process_vm_readv, so with
+// kernel.yama.ptrace_scope >= 1 the binary needs CAP_SYS_PTRACE (or root) to
+// read processes it did not start itself.
+//
+// Windows uses OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION) and
+// ReadProcessMemory.
+class Process final : public Target {
 public:
-    ~ProcessProvider() override;
+    // Opens a process for reading. Throws patty::Error with the reason
+    // (no such process, missing permission, ...). Linux probes one real read
+    // so a permission problem fails here instead of producing empty scans.
+    static Process open(uint32_t pid);
 
-    static std::optional<ProcessProvider> open(uint32_t pid);
-    static std::optional<ProcessProvider> openByName(const std::string& name);
-    static ProcessProvider fromHandle(HANDLE handle, bool owning = false);
-    static std::vector<uint32_t> findPIDs(const std::string& name);
+    // Opens the lowest pid whose executable name matches (see find()).
+    static Process open(std::string_view name);
 
+    // The calling process.
+    static Process current();
+
+    // Pids whose executable name equals `name`, case-insensitively, ascending.
+    // Linux matches comm, the executable path and argv[0], so Wine/Proton
+    // processes are found by their Windows name ("Game.exe").
+    static std::vector<uint32_t> find(std::string_view name);
+
+    using Target::read;
     bool read(uintptr_t address, void* buffer, size_t size) override;
-    std::vector<MemoryRegion> regions() override;
-    bool is64Bit() const override { return m_is64bit; }
+    std::vector<Region> regions() override;
+    size_t pointer_size() const override { return m_pointer_size; }
+    std::string describe() const override;
 
     uint32_t pid() const { return m_pid; }
-    HANDLE handle() const { return m_handle; }
-
-    ProcessProvider(ProcessProvider&& other) noexcept;
-    ProcessProvider& operator=(ProcessProvider&& other) noexcept;
-    ProcessProvider(const ProcessProvider&) = delete;
-    ProcessProvider& operator=(const ProcessProvider&) = delete;
+    const std::string& name() const { return m_name; }
 
 private:
-    ProcessProvider() = default;
+    Process() = default;
 
-    HANDLE m_handle = nullptr;
     uint32_t m_pid = 0;
-    bool m_is64bit = true;
-    bool m_owning = true;
-
-    // Cached regions (invalidated on re-query)
-    mutable std::vector<MemoryRegion> m_cached_regions;
-    mutable bool m_regions_valid = false;
-
-    static std::string getModuleName(HANDLE process, uintptr_t address);
+    size_t m_pointer_size = 8;
+    std::string m_name;
+    // Windows process handle, closed on destruction. Unused on Linux.
+    std::unique_ptr<void, void (*)(void*)> m_handle{nullptr, nullptr};
 };
-
-#endif // _WIN32
 
 } // namespace patty

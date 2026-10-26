@@ -1,0 +1,11 @@
+{
+  "name": "toygame",
+  "module": "toygame",
+  "patterns": [
+    { "name": "LocalPlayer", "aob": "48 8B 05 ?? ?? ?? ?? 66 0F EF C0 48 85 C0",
+      "result_offset": 3, "resolve": ["rip"] },
+    { "name": "Tick", "aob": "F3 0F 1E FA 48 8B 05" },
+    { "name": "Prologue", "aob": "F3 0F 1E FA" },
+    { "name": "SpawnEnemy", "aob": "48 8B 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 89 C3" }
+  ]
+}

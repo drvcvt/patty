@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(patty VERSION 0.1.0 LANGUAGES CXX)
+project(patty VERSION 0.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -69,17 +69,37 @@ if(PATTY_BUILD_CLI)
         )
         FetchContent_MakeAvailable(cli11)
     endif()
+
+    # isocline: line editing, history and completion for the REPL (MIT, Linux + Windows).
+    # SOURCE_SUBDIR points nowhere so only the sources are fetched; we build the one C file.
+    enable_language(C)
+    FetchContent_Declare(
+        isocline
+        GIT_REPOSITORY https://github.com/daanx/isocline.git
+        GIT_TAG        v1.0.9
+        GIT_SHALLOW    TRUE
+        SOURCE_SUBDIR  _sources_only
+    )
+    FetchContent_MakeAvailable(isocline)
+    add_library(patty_isocline STATIC "${isocline_SOURCE_DIR}/src/isocline.c")
+    target_include_directories(patty_isocline SYSTEM PUBLIC "${isocline_SOURCE_DIR}/include")
 endif()
 
 set(PATTY_SOURCES
-    src/core/pattern.cpp
-    src/core/scanner.cpp
-    src/memory/file.cpp
-    src/target/loader.cpp
+    src/memory/image.cpp
+    src/memory/target.cpp
+    src/profile/check.cpp
+    src/profile/profile.cpp
+    src/scan/pattern.cpp
+    src/scan/probe.cpp
+    src/scan/resolve.cpp
+    src/scan/scanner.cpp
 )
 
 if(WIN32)
     list(APPEND PATTY_SOURCES src/memory/process_win.cpp)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    list(APPEND PATTY_SOURCES src/memory/process_linux.cpp)
 endif()
 
 add_library(patty ${PATTY_SOURCES})
@@ -112,11 +132,19 @@ endif()
 patty_enable_warnings(patty)
 
 if(PATTY_BUILD_CLI)
-    add_executable(patty_cli cli/main.cpp)
+    add_executable(patty_cli
+        cli/main.cpp
+        cli/commands.cpp
+        cli/output.cpp
+        cli/repl/expr.cpp
+        cli/repl/repl.cpp
+        cli/repl/session.cpp
+        cli/repl/session_memory.cpp
+    )
     set_target_properties(patty_cli PROPERTIES OUTPUT_NAME patty)
     target_compile_features(patty_cli PRIVATE cxx_std_20)
     target_include_directories(patty_cli SYSTEM PRIVATE "${PATTY_NLOHMANN_JSON_INCLUDE_DIRS}")
-    target_link_libraries(patty_cli PRIVATE patty CLI11::CLI11)
+    target_link_libraries(patty_cli PRIVATE patty CLI11::CLI11 patty_isocline)
     patty_enable_warnings(patty_cli)
 endif()
 
@@ -190,8 +218,12 @@ if(PATTY_BUILD_TESTS)
     add_executable(patty_tests
         tests/test_pattern.cpp
         tests/test_scanner.cpp
-        tests/test_providers.cpp
+        tests/test_image.cpp
+        tests/test_check.cpp
     )
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_sources(patty_tests PRIVATE tests/test_process_linux.cpp)
+    endif()
     target_compile_features(patty_tests PRIVATE cxx_std_20)
     target_link_libraries(patty_tests PRIVATE patty GTest::gtest_main)
     patty_enable_warnings(patty_tests)
@@ -209,12 +241,21 @@ if(PATTY_BUILD_TESTS)
         find_package(Python3 COMPONENTS Interpreter QUIET)
         if(Python3_Interpreter_FOUND)
             add_test(
+                NAME patty_repl_smoke
+                COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/repl_smoke.py ${PATTY_SMOKE_FIXTURE} $<TARGET_FILE:patty_cli>
+            )
+            add_test(
                 NAME patty_cli_json_smoke
                 COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_smoke.py ${PATTY_SMOKE_FIXTURE} $<TARGET_FILE:patty_cli>
             )
 
+            # The MCP server runs from its own venv (mcp/.venv) when present.
+            set(PATTY_MCP_PYTHON "${Python3_EXECUTABLE}")
+            if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/mcp/.venv/bin/python")
+                set(PATTY_MCP_PYTHON "${CMAKE_CURRENT_SOURCE_DIR}/mcp/.venv/bin/python")
+            endif()
             execute_process(
-                COMMAND ${Python3_EXECUTABLE} -c "import fastmcp"
+                COMMAND ${PATTY_MCP_PYTHON} -c "import fastmcp"
                 RESULT_VARIABLE PATTY_HAS_FASTMCP
                 OUTPUT_QUIET
                 ERROR_QUIET
@@ -222,7 +263,8 @@ if(PATTY_BUILD_TESTS)
             if(PATTY_HAS_FASTMCP EQUAL 0)
                 add_test(
                     NAME patty_mcp_smoke
-                    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/mcp_smoke.py ${PATTY_SMOKE_FIXTURE} $<TARGET_FILE:patty_cli>
+                    COMMAND ${PATTY_MCP_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/mcp_smoke.py ${PATTY_SMOKE_FIXTURE} $<TARGET_FILE:patty_cli>
+                    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
                 )
             endif()
         endif()

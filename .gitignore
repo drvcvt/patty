@@ -21,3 +21,12 @@ compile_commands.json
 .omc/
 .omx/
 .claude/
+
+# MCP server venv
+mcp/.venv/
+__pycache__/
+
+# Local agent configs and plans
+.codex/
+.kimi-code/
+docs/

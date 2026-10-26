@@ -26,4 +26,7 @@ assert probe['probed_size'] == 32, probe
 
 regions = json.loads(module.list_regions(file_path=str(fixture)))
 assert isinstance(regions, list) and regions, regions
+check = json.loads(module.check_profile(profile_path=str(fixture.with_name('patty-smoke.profile.json')),
+                                        file_path=str(fixture)))
+assert check['summary'] == {'ok': 1, 'ambiguous': 1, 'missing': 1, 'unresolved': 0}, check
 print('mcp-smoke-ok')

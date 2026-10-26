@@ -1,182 +1,142 @@
 #include "patty/memory/process.h"
+#include "patty/error.h"
 
-#ifdef _WIN32
+#include "../util.h"
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 #include <psapi.h>
+#include <tlhelp32.h>
+
 #include <algorithm>
-#include <cctype>
 
 namespace patty {
 
-ProcessProvider::~ProcessProvider() {
-    if (m_owning && m_handle && m_handle != INVALID_HANDLE_VALUE) {
-        CloseHandle(m_handle);
-        m_handle = nullptr;
-    }
+namespace {
+
+HANDLE handle_of(const std::unique_ptr<void, void (*)(void*)>& handle) {
+    return static_cast<HANDLE>(handle.get());
 }
 
-ProcessProvider::ProcessProvider(ProcessProvider&& other) noexcept
-    : m_handle(other.m_handle)
-    , m_pid(other.m_pid)
-    , m_is64bit(other.m_is64bit)
-    , m_owning(other.m_owning)
-    , m_cached_regions(std::move(other.m_cached_regions))
-    , m_regions_valid(other.m_regions_valid) {
-    other.m_handle = nullptr;
-    other.m_pid = 0;
-    other.m_owning = true;
-    other.m_regions_valid = false;
+void close_handle(void* handle) {
+    CloseHandle(static_cast<HANDLE>(handle));
 }
 
-ProcessProvider& ProcessProvider::operator=(ProcessProvider&& other) noexcept {
-    if (this != &other) {
-        if (m_owning && m_handle && m_handle != INVALID_HANDLE_VALUE)
-            CloseHandle(m_handle);
-        m_handle = other.m_handle;
-        m_pid = other.m_pid;
-        m_is64bit = other.m_is64bit;
-        m_owning = other.m_owning;
-        m_cached_regions = std::move(other.m_cached_regions);
-        m_regions_valid = other.m_regions_valid;
-        other.m_handle = nullptr;
-        other.m_pid = 0;
-        other.m_owning = true;
-        other.m_regions_valid = false;
-    }
-    return *this;
+std::string system_error(DWORD code) {
+    char* text = nullptr;
+    const DWORD length = FormatMessageA(
+        FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+        nullptr, code, 0, reinterpret_cast<LPSTR>(&text), 0, nullptr);
+    std::string message = length ? std::string(text, length) : "error " + std::to_string(code);
+    LocalFree(text);
+    while (!message.empty() && (message.back() == '\n' || message.back() == '\r' || message.back() == '.'))
+        message.pop_back();
+    return message;
 }
 
-ProcessProvider ProcessProvider::fromHandle(HANDLE handle, bool owning) {
-    ProcessProvider provider;
-    provider.m_handle = handle;
-    provider.m_owning = owning;
-    provider.m_pid = GetProcessId(handle);
-
-    BOOL isWow64 = FALSE;
-    if (IsWow64Process(handle, &isWow64)) {
-        provider.m_is64bit = !isWow64;
-    }
-
-    return provider;
+std::string mapped_name(HANDLE process, uintptr_t address) {
+    char path[MAX_PATH] = {};
+    const DWORD length = GetMappedFileNameA(process, reinterpret_cast<LPVOID>(address), path, MAX_PATH);
+    if (length == 0)
+        return {};
+    const std::string full(path, length);
+    const auto slash = full.find_last_of('\\');
+    return slash == std::string::npos ? full : full.substr(slash + 1);
 }
 
-std::optional<ProcessProvider> ProcessProvider::open(uint32_t pid) {
-    HANDLE handle = OpenProcess(
-        PROCESS_VM_READ | PROCESS_QUERY_INFORMATION,
-        FALSE,
-        pid
-    );
+} // namespace
 
-    if (!handle || handle == INVALID_HANDLE_VALUE)
-        return std::nullopt;
+Process Process::open(uint32_t pid) {
+    HANDLE handle = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, pid);
+    if (!handle)
+        throw Error("cannot open pid " + std::to_string(pid) + ": " + system_error(GetLastError()));
 
-    ProcessProvider provider;
-    provider.m_handle = handle;
-    provider.m_pid = pid;
+    Process process;
+    process.m_pid = pid;
+    process.m_handle = {handle, &close_handle};
 
-    BOOL isWow64 = FALSE;
-    if (IsWow64Process(handle, &isWow64)) {
-        provider.m_is64bit = !isWow64;
-    }
+    BOOL wow64 = FALSE;
+    if (IsWow64Process(handle, &wow64) && wow64)
+        process.m_pointer_size = 4;
 
-    return provider;
+    char name[MAX_PATH] = {};
+    if (GetModuleBaseNameA(handle, nullptr, name, MAX_PATH))
+        process.m_name = name;
+    return process;
 }
 
-std::optional<ProcessProvider> ProcessProvider::openByName(const std::string& name) {
-    auto pids = findPIDs(name);
-    if (pids.empty()) return std::nullopt;
-    return open(pids[0]);
+Process Process::open(std::string_view name) {
+    const auto pids = find(name);
+    if (pids.empty())
+        throw Error("no process named " + std::string(name));
+    return open(pids.front());
 }
 
-std::vector<uint32_t> ProcessProvider::findPIDs(const std::string& name) {
+Process Process::current() {
+    return open(static_cast<uint32_t>(GetCurrentProcessId()));
+}
+
+std::vector<uint32_t> Process::find(std::string_view name) {
     std::vector<uint32_t> result;
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE)
+        return result;
 
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snap == INVALID_HANDLE_VALUE) return result;
-
-    PROCESSENTRY32 pe;
-    pe.dwSize = sizeof(pe);
-
-    auto toLower = [](std::string s) {
-        std::transform(s.begin(), s.end(), s.begin(),
-                       [](unsigned char c) { return std::tolower(c); });
-        return s;
-    };
-
-    std::string lower_name = toLower(name);
-
-    if (Process32First(snap, &pe)) {
+    const auto wanted = detail::lower(name);
+    PROCESSENTRY32 entry{};
+    entry.dwSize = sizeof(entry);
+    if (Process32First(snapshot, &entry)) {
         do {
-            if (toLower(pe.szExeFile) == lower_name) {
-                result.push_back(pe.th32ProcessID);
-            }
-        } while (Process32Next(snap, &pe));
+            if (detail::lower(entry.szExeFile) == wanted)
+                result.push_back(entry.th32ProcessID);
+        } while (Process32Next(snapshot, &entry));
     }
-
-    CloseHandle(snap);
+    CloseHandle(snapshot);
+    std::sort(result.begin(), result.end());
     return result;
 }
 
-bool ProcessProvider::read(uintptr_t address, void* buffer, size_t size) {
-    SIZE_T bytesRead = 0;
-    BOOL success = ReadProcessMemory(
-        m_handle,
-        reinterpret_cast<LPCVOID>(address),
-        buffer,
-        size,
-        &bytesRead
-    );
-    return success && bytesRead == size;
+bool Process::read(uintptr_t address, void* buffer, size_t size) {
+    SIZE_T done = 0;
+    return size == 0 ||
+           (ReadProcessMemory(handle_of(m_handle), reinterpret_cast<LPCVOID>(address), buffer, size, &done) &&
+            done == size);
 }
 
-std::vector<MemoryRegion> ProcessProvider::regions() {
-    if (m_regions_valid)
-        return m_cached_regions;
+std::vector<Region> Process::regions() {
+    std::vector<Region> regions;
+    const HANDLE handle = handle_of(m_handle);
+    const uintptr_t limit = m_pointer_size == 4 ? 0x7FFFFFFF : 0x7FFFFFFFFFFF;
 
-    m_cached_regions.clear();
-
-    MEMORY_BASIC_INFORMATION mbi{};
-    uintptr_t addr = 0;
-    uintptr_t max_addr = m_is64bit ? 0x7FFFFFFFFFFF : 0x7FFFFFFF;
-
-    while (addr < max_addr) {
-        if (VirtualQueryEx(m_handle, reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi)) == 0)
-            break;
-
-        if (mbi.State == MEM_COMMIT && mbi.RegionSize >= 0x1000) {
-            if (!(mbi.Protect & PAGE_GUARD) && !(mbi.Protect & PAGE_NOACCESS) && mbi.Protect != 0) {
-                MemoryRegion region;
-                region.base = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
-                region.size = mbi.RegionSize;
-                region.protection = mbi.Protect;
-                region.type = mbi.Type;
-                region.name = getModuleName(m_handle, region.base);
-                m_cached_regions.push_back(std::move(region));
-            }
+    MEMORY_BASIC_INFORMATION info{};
+    uintptr_t address = 0;
+    while (address < limit &&
+           VirtualQueryEx(handle, reinterpret_cast<LPCVOID>(address), &info, sizeof(info)) != 0) {
+        const DWORD protect = info.Protect;
+        const bool usable = info.State == MEM_COMMIT && protect != 0 &&
+                            !(protect & PAGE_GUARD) && !(protect & PAGE_NOACCESS);
+        if (usable) {
+            const auto base = reinterpret_cast<uintptr_t>(info.BaseAddress);
+            const bool exec = protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
+                                         PAGE_EXECUTE_WRITECOPY);
+            const bool write = protect & (PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE |
+                                          PAGE_EXECUTE_WRITECOPY);
+            const bool read = !(protect & PAGE_EXECUTE);  // execute-only pages cannot be read
+            regions.push_back({base, info.RegionSize, read, write, exec,
+                               info.Type == MEM_IMAGE || info.Type == MEM_MAPPED ? mapped_name(handle, base) : ""});
         }
-
-        uintptr_t next = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
-        if (next <= addr) break;
-        addr = next;
+        const uintptr_t next = reinterpret_cast<uintptr_t>(info.BaseAddress) + info.RegionSize;
+        if (next <= address)
+            break;
+        address = next;
     }
-
-    m_regions_valid = true;
-    return m_cached_regions;
+    return regions;
 }
 
-std::string ProcessProvider::getModuleName(HANDLE process, uintptr_t address) {
-    char name[MAX_PATH] = {};
-    DWORD len = GetMappedFileNameA(process, reinterpret_cast<LPVOID>(address),
-                                    name, MAX_PATH);
-    if (len == 0) return {};
-
-    std::string path(name, len);
-    auto pos = path.rfind('\\');
-    if (pos != std::string::npos)
-        return path.substr(pos + 1);
-    return path;
+std::string Process::describe() const {
+    return "pid " + std::to_string(m_pid) + " (" + m_name + ")";
 }
 
 } // namespace patty
-
-#endif // _WIN32

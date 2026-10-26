@@ -1,383 +1,265 @@
 #include <gtest/gtest.h>
+#include <patty/patty.h>
+
 #include <algorithm>
 #include <cstring>
-#include <patty/core/scanner.h>
-#include <patty/memory/buffer.h>
+#include <map>
 
 using namespace patty;
 
-class ScannerTest : public ::testing::Test {
-protected:
-    // Build a buffer with known patterns embedded
-    std::vector<uint8_t> makeTestBuffer() {
-        std::vector<uint8_t> buf(4096, 0xCC); // Fill with INT3
+namespace {
 
-        // Place pattern at offset 0x100
-        // MOV rax, [rip+disp32]: 48 8B 05 XX XX XX XX
-        buf[0x100] = 0x48;
-        buf[0x101] = 0x8B;
-        buf[0x102] = 0x05;
-        buf[0x103] = 0x10; // disp32 = 0x00000010
-        buf[0x104] = 0x00;
-        buf[0x105] = 0x00;
-        buf[0x106] = 0x00;
+// 0x100 and 0x200: "mov rax, [rip+disp]" with different displacements.
+// 0x300: DE AD BE EF once.
+Image sample(uintptr_t base = 0x10000) {
+    std::vector<uint8_t> bytes(0x1000, 0xCC);
+    const uint8_t first[] = {0x48, 0x8B, 0x05, 0x10, 0x00, 0x00, 0x00};
+    const uint8_t second[] = {0x48, 0x8B, 0x05, 0x20, 0x00, 0x00, 0x00};
+    const uint8_t marker[] = {0xDE, 0xAD, 0xBE, 0xEF};
+    std::memcpy(bytes.data() + 0x100, first, sizeof(first));
+    std::memcpy(bytes.data() + 0x200, second, sizeof(second));
+    std::memcpy(bytes.data() + 0x300, marker, sizeof(marker));
+    return Image::from_bytes(std::move(bytes), base);
+}
 
-        // Place same pattern at offset 0x200
-        buf[0x200] = 0x48;
-        buf[0x201] = 0x8B;
-        buf[0x202] = 0x05;
-        buf[0x203] = 0x20; // disp32 = 0x00000020
-        buf[0x204] = 0x00;
-        buf[0x205] = 0x00;
-        buf[0x206] = 0x00;
-
-        // Place a unique pattern at offset 0x300
-        buf[0x300] = 0xDE;
-        buf[0x301] = 0xAD;
-        buf[0x302] = 0xBE;
-        buf[0x303] = 0xEF;
-
-        return buf;
-    }
-};
-
-class SegmentedProvider : public IMemoryProvider {
+// Several regions with gaps between them; reads of `holes` pages fail.
+class Patchwork final : public Target {
 public:
-    struct Segment {
-        MemoryRegion region;
-        std::vector<uint8_t> data;
-    };
-
-    explicit SegmentedProvider(std::vector<Segment> segments)
-        : m_segments(std::move(segments)) {}
+    void add(Region region, std::vector<uint8_t> data) {
+        m_parts.emplace(region.base, Part{std::move(region), std::move(data)});
+    }
+    void hole(uintptr_t page) { m_holes.push_back(page); }
 
     bool read(uintptr_t address, void* buffer, size_t size) override {
-        for (const auto& segment : m_segments) {
-            if (address < segment.region.base || address + size > segment.region.end())
-                continue;
-            const auto offset = static_cast<size_t>(address - segment.region.base);
-            std::memcpy(buffer, segment.data.data() + offset, size);
-            return true;
+        for (const uintptr_t page : m_holes)
+            if (address < page + 0x1000 && address + size > page)
+                return false;
+        for (const auto& [base, part] : m_parts) {
+            if (address >= base && address + size <= part.region.end()) {
+                std::memcpy(buffer, part.data.data() + (address - base), size);
+                return true;
+            }
         }
         return false;
     }
-
-    std::vector<MemoryRegion> regions() override {
-        std::vector<MemoryRegion> regions;
-        regions.reserve(m_segments.size());
-        for (const auto& segment : m_segments)
-            regions.push_back(segment.region);
-        return regions;
+    std::vector<Region> regions() override {
+        std::vector<Region> out;
+        for (const auto& [base, part] : m_parts)
+            out.push_back(part.region);
+        return out;
     }
-
-    bool is64Bit() const override { return true; }
+    std::string describe() const override { return "patchwork"; }
 
 private:
-    std::vector<Segment> m_segments;
+    struct Part { Region region; std::vector<uint8_t> data; };
+    std::map<uintptr_t, Part> m_parts;
+    std::vector<uintptr_t> m_holes;
 };
 
-TEST_F(ScannerTest, BasicScan) {
-    auto buf = makeTestBuffer();
-    auto provider = std::make_shared<BufferProvider>(std::move(buf), 0x10000);
-    Scanner scanner(provider);
-
-    auto pattern = Pattern::fromAOB("48 8B 05 ?? ?? ?? ??", "test");
-    auto result = scanner.scan(pattern);
-
-    EXPECT_EQ(result.pattern_name, "test");
-    ASSERT_EQ(result.matches.size(), 2);
-    EXPECT_EQ(result.matches[0].address, 0x10100);
-    EXPECT_EQ(result.matches[1].address, 0x10200);
+std::vector<uint8_t> filled_with_marker(size_t size, size_t at) {
+    std::vector<uint8_t> data(size, 0x90);
+    const uint8_t marker[] = {0xDE, 0xAD, 0xBE, 0xEF};
+    std::memcpy(data.data() + at, marker, sizeof(marker));
+    return data;
 }
 
-TEST_F(ScannerTest, MaxResults) {
-    auto buf = makeTestBuffer();
-    auto provider = std::make_shared<BufferProvider>(std::move(buf), 0x10000);
-    Scanner scanner(provider);
+} // namespace
 
-    auto pattern = Pattern::fromAOB("48 8B 05 ?? ?? ?? ??");
-    ScanConfig config;
-    config.max_results = 1;
-    auto result = scanner.scan(pattern, config);
-
-    ASSERT_EQ(result.matches.size(), 1);
-    EXPECT_EQ(result.matches[0].address, 0x10100);
+TEST(Scanner, FindsAllMatchesSorted) {
+    auto image = sample();
+    const auto result = Scanner(image).find(Pattern::aob("48 8B 05 ?? ?? ?? ??"));
+    ASSERT_EQ(result.size(), 2u);
+    EXPECT_EQ(result[0].address, 0x10100u);
+    EXPECT_EQ(result[1].address, 0x10200u);
+    EXPECT_FALSE(result[0].resolved) << "no resolve steps, nothing resolved";
+    EXPECT_EQ(result[0].value(), 0x10100u);
+    EXPECT_GT(result.bytes_scanned, 0u);
 }
 
-TEST_F(ScannerTest, UniquePattern) {
-    auto buf = makeTestBuffer();
-    auto provider = std::make_shared<BufferProvider>(std::move(buf), 0x10000);
-    Scanner scanner(provider);
-
-    auto pattern = Pattern::fromAOB("DE AD BE EF", "deadbeef");
-    auto result = scanner.scan(pattern);
-
-    ASSERT_EQ(result.matches.size(), 1);
-    EXPECT_EQ(result.matches[0].address, 0x10300);
+TEST(Scanner, ResolvesRipRelative) {
+    auto image = sample();
+    const auto result = Scanner(image).find(Pattern::aob("48 8B 05 ?? ?? ?? ??").rip(3));
+    ASSERT_EQ(result.size(), 2u);
+    EXPECT_EQ(result[0].resolved, 0x10100u + 7 + 0x10);
+    EXPECT_EQ(result[1].resolved, 0x10200u + 7 + 0x20);
 }
 
-TEST_F(ScannerTest, NoMatch) {
-    auto buf = makeTestBuffer();
-    auto provider = std::make_shared<BufferProvider>(std::move(buf), 0x10000);
-    Scanner scanner(provider);
-
-    auto pattern = Pattern::fromAOB("FF FE FD FC FB FA");
-    auto result = scanner.scan(pattern);
-
-    EXPECT_TRUE(result.matches.empty());
+TEST(Scanner, FailedDerefIsFlagged) {
+    auto image = sample();
+    // 0xCCCC... is not a mapped address, so the deref after rip fails.
+    const auto result = Scanner(image).find(Pattern::aob("48 8B 05 ?? ?? ?? ??").rip(3).deref().deref());
+    ASSERT_EQ(result.size(), 2u);
+    EXPECT_TRUE(result[0].resolve_failed);
+    EXPECT_FALSE(result[0].resolved);
 }
 
-TEST_F(ScannerTest, RIPRelativeResolve) {
-    auto buf = makeTestBuffer();
-    auto provider = std::make_shared<BufferProvider>(std::move(buf), 0x10000);
-    Scanner scanner(provider);
-
-    auto pattern = Pattern::fromAOB("48 8B 05 ?? ?? ?? ??", "rip_test")
-        .withOffset(3)
-        .withResolve(ResolveType::RIPRelative);
-
-    auto result = scanner.scan(pattern);
-
-    ASSERT_EQ(result.matches.size(), 2);
-    // First match at 0x10100, result_offset=3 -> resolve at 0x10103
-    // disp32 at 0x10103 = 0x10, resolved = 0x10103 + 4 + 0x10 = 0x10117
-    EXPECT_EQ(result.matches[0].resolved, 0x10117);
+TEST(Scanner, MaxAndMissing) {
+    auto image = sample();
+    Scanner scanner(image);
+    EXPECT_EQ(scanner.find(Pattern::aob("48 8B 05"), {.max = 1}).size(), 1u);
+    EXPECT_TRUE(scanner.find(Pattern::aob("11 22 33 44")).empty());
 }
 
-TEST_F(ScannerTest, MultiPatternScan) {
-    auto buf = makeTestBuffer();
-    auto provider = std::make_shared<BufferProvider>(std::move(buf), 0x10000);
-    Scanner scanner(provider);
-
-    std::vector<Pattern> patterns = {
-        Pattern::fromAOB("48 8B 05 ?? ?? ?? ??", "pattern1"),
-        Pattern::fromAOB("DE AD BE EF", "pattern2"),
+TEST(Scanner, ManyPatternsInOnePass) {
+    auto image = sample();
+    const std::vector<Pattern> patterns = {
+        Pattern::aob("48 8B 05").named("mov"),
+        Pattern::aob("?? AD BE EF").named("marker"),
+        Pattern::aob("11 22 33").named("absent"),
     };
-
-    auto result = scanner.scan(std::span<const Pattern>(patterns));
-
-    ASSERT_EQ(result.results.size(), 2);
-    EXPECT_EQ(result.results[0].matches.size(), 2); // pattern1 matches twice
-    EXPECT_EQ(result.results[1].matches.size(), 1); // pattern2 matches once
+    const auto results = Scanner(image).find(patterns);
+    ASSERT_EQ(results.size(), 3u);
+    EXPECT_EQ(results[0].pattern, "mov");
+    EXPECT_EQ(results[0].size(), 2u);
+    ASSERT_EQ(results[1].size(), 1u);
+    EXPECT_EQ(results[1][0].address, 0x10300u);
+    EXPECT_TRUE(results[2].empty());
 }
 
-TEST_F(ScannerTest, ScanStatistics) {
-    auto buf = makeTestBuffer();
-    auto provider = std::make_shared<BufferProvider>(std::move(buf), 0x10000);
-    Scanner scanner(provider);
-
-    auto pattern = Pattern::fromAOB("DE AD BE EF");
-    auto result = scanner.scan(pattern);
-
-    EXPECT_GT(result.elapsed_ms, 0.0);
-    EXPECT_EQ(result.bytes_scanned, 4096);
-    EXPECT_EQ(result.regions_scanned, 1);
-}
-
-TEST_F(ScannerTest, EmptyBuffer) {
-    auto provider = std::make_shared<BufferProvider>(std::vector<uint8_t>{});
-    Scanner scanner(provider);
-
-    auto pattern = Pattern::fromAOB("48 8B");
-    auto result = scanner.scan(pattern);
-
-    EXPECT_TRUE(result.matches.empty());
-}
-
-TEST_F(ScannerTest, ScanForValue) {
-    // Place a known 64-bit value in the buffer
-    std::vector<uint8_t> buf(4096, 0);
-    uint64_t target = 0xDEADBEEFCAFEBABE;
-    memcpy(buf.data() + 0x200, &target, 8);
-    memcpy(buf.data() + 0x800, &target, 8);
-
-    auto provider = std::make_shared<BufferProvider>(std::move(buf), 0x10000);
-    Scanner scanner(provider);
-
-    auto result = scanner.scanForValue(target, 8);
-    ASSERT_EQ(result.matches.size(), 2);
-    EXPECT_EQ(result.matches[0].address, 0x10200);
-    EXPECT_EQ(result.matches[1].address, 0x10800);
-}
-
-TEST_F(ScannerTest, ScanForPointer) {
-    std::vector<uint8_t> buf(4096, 0);
-    uintptr_t ptr = 0x00007FF612340000;
-    memcpy(buf.data() + 0x100, &ptr, 8);
-
-    auto provider = std::make_shared<BufferProvider>(std::move(buf), 0x10000);
-    Scanner scanner(provider);
-
-    auto result = scanner.scanForPointer(ptr);
-    ASSERT_EQ(result.matches.size(), 1);
-    EXPECT_EQ(result.matches[0].address, 0x10100);
-}
-
-TEST_F(ScannerTest, ScanForPointersBatch) {
-    std::vector<uint8_t> buf(4096, 0);
-    uintptr_t ptr1 = 0xAAAAAAAAAAAAAAAA;
-    uintptr_t ptr2 = 0xBBBBBBBBBBBBBBBB;
-    memcpy(buf.data() + 0x100, &ptr1, 8);
-    memcpy(buf.data() + 0x200, &ptr2, 8);
-
-    auto provider = std::make_shared<BufferProvider>(std::move(buf), 0x10000);
-    Scanner scanner(provider);
-
-    std::vector<uintptr_t> targets = {ptr1, ptr2, 0xCCCCCCCCCCCCCCCC};
-    auto result = scanner.scanForPointers(std::span(targets));
-    ASSERT_EQ(result.results.size(), 3);
-    EXPECT_EQ(result.results[0].matches.size(), 1);
-    EXPECT_EQ(result.results[1].matches.size(), 1);
-    EXPECT_EQ(result.results[2].matches.size(), 0);
-}
-
-TEST_F(ScannerTest, ProbeObject) {
-    std::vector<uint8_t> buf(0x1000, 0);
-    uintptr_t base = 0x10000;
-
-    // offset 0x00: zero
-    // offset 0x08: small int (42)
-    uint64_t small = 42;
-    memcpy(buf.data() + 0x08, &small, 8);
-    // offset 0x10: pointer to 0x10500 (valid region, points to ASCII)
-    uintptr_t str_ptr = base + 0x500;
-    memcpy(buf.data() + 0x10, &str_ptr, 8);
-    // Place a string at 0x500
-    const char* hello = "Hello World";
-    memcpy(buf.data() + 0x500, hello, strlen(hello) + 1);
-
-    auto provider = std::make_shared<BufferProvider>(std::move(buf), base);
-    Scanner scanner(provider);
-
-    auto probe = scanner.probeObject(base, 0x20);
-    ASSERT_EQ(probe.fields.size(), 4); // 0x00, 0x08, 0x10, 0x18
-    EXPECT_EQ(probe.fields[0].classification, "zero");
-    EXPECT_EQ(probe.fields[1].classification, "small_int");
-    EXPECT_EQ(probe.fields[2].classification, "string_ptr");
-    EXPECT_EQ(probe.fields[2].detail, "Hello World");
-}
-
-TEST_F(ScannerTest, ScanWithFilter) {
-    auto buf = makeTestBuffer();
-    auto provider = std::make_shared<BufferProvider>(std::move(buf), 0x10000);
-    Scanner scanner(provider);
-
-    auto pattern = Pattern::fromAOB("48 8B 05 ?? ?? ?? ??", "filtered");
-
-    // Without filter: 2 matches
-    auto all = scanner.scan(pattern);
-    ASSERT_EQ(all.matches.size(), 2);
-
-    // With filter: only keep matches at address > 0x10150
-    auto filtered = scanner.scan(pattern, ScanConfig{}, [](const Match& m) {
-        return m.address > 0x10150;
-    });
-    ASSERT_EQ(filtered.matches.size(), 1);
-    EXPECT_EQ(filtered.matches[0].address, 0x10200);
-}
-
-TEST(PatternTest_String, FromString) {
-    auto p = Pattern::fromString("Hello", "str_test");
-    ASSERT_EQ(p.bytes.size(), 5);
-    EXPECT_EQ(p.bytes[0].value, 'H');
-    EXPECT_EQ(p.bytes[4].value, 'o');
-    EXPECT_FALSE(p.bytes[0].wildcard);
-}
-
-TEST(PatternTest_String, FromSSOStringInline) {
-    auto p = Pattern::fromSSOString("Hello", "sso_test");
-    // SSO layout: 16 bytes buffer + 8 bytes size + 8 bytes capacity = 32
-    ASSERT_EQ(p.bytes.size(), 32);
-    // First byte: 'H'
-    EXPECT_EQ(p.bytes[0].value, 'H');
-    EXPECT_FALSE(p.bytes[0].wildcard);
-    // After string + null: wildcards
-    EXPECT_TRUE(p.bytes[6].wildcard);
-    // Size at offset 16: 5 (little-endian)
-    EXPECT_EQ(p.bytes[16].value, 5);
-    EXPECT_FALSE(p.bytes[16].wildcard);
-    // Capacity at offset 24: 15 for SSO
-    EXPECT_EQ(p.bytes[24].value, 15);
-    EXPECT_FALSE(p.bytes[24].wildcard);
-}
-
-TEST(PatternTest_String, FromSSOStringHeap) {
-    std::string long_str = "This is a longer string that exceeds SSO";
-    auto p = Pattern::fromSSOString(long_str, "sso_heap");
-    ASSERT_EQ(p.bytes.size(), 32);
-    // Heap pointer: wildcards
-    EXPECT_TRUE(p.bytes[0].wildcard);
-    EXPECT_TRUE(p.bytes[7].wildcard);
-    // Size at offset 16: string length
-    EXPECT_EQ(p.bytes[16].value, static_cast<uint8_t>(long_str.size()));
-    EXPECT_FALSE(p.bytes[16].wildcard);
-    // Capacity: wildcard (unknown heap allocation)
-    EXPECT_TRUE(p.bytes[24].wildcard);
-}
-
-TEST(RegionTest, Make) {
-    auto r = MemoryRegion::make(0x1000, 0x2000, true, true, false, "test");
-    EXPECT_EQ(r.base, 0x1000);
-    EXPECT_EQ(r.size, 0x2000);
-    EXPECT_TRUE(r.isWritable());
-    EXPECT_TRUE(r.isReadable());
-    EXPECT_FALSE(r.isExecutable());
-    EXPECT_EQ(r.name, "test");
-
-    auto rx = MemoryRegion::make(0x1000, 0x100, true, false, true);
-    EXPECT_TRUE(rx.isExecutable());
-    EXPECT_FALSE(rx.isWritable());
-}
-
-TEST(ScannerRegressionTest, ParallelMaxResultsIsRespectedAcrossRegions) {
-    std::vector<SegmentedProvider::Segment> segments;
-    for (size_t i = 0; i < 6; ++i) {
-        auto data = std::vector<uint8_t>(0x200, 0x90);
-        data[0x10] = 0xDE;
-        data[0x11] = 0xAD;
-        data[0x12] = 0xBE;
-        data[0x13] = 0xEF;
-
-        auto base = static_cast<uintptr_t>(0x10000 + i * 0x1000);
-        auto region = MemoryRegion::make(base, data.size(), true, true, false, "seg" + std::to_string(i));
-        segments.push_back({region, std::move(data)});
+TEST(Scanner, PatternAcrossChunkBoundaryFoundOnce) {
+    auto image = Image::from_bytes(filled_with_marker(0x3000, 0xFFE), 0x400000);
+    for (const bool parallel : {false, true}) {
+        const auto result = Scanner(image).find(Pattern::aob("DE AD BE EF"),
+                                                {.parallel = parallel, .chunk_size = 0x1000});
+        ASSERT_EQ(result.size(), 1u) << "parallel=" << parallel;
+        EXPECT_EQ(result[0].address, 0x400FFEu);
     }
+}
 
-    auto provider = std::make_shared<SegmentedProvider>(std::move(segments));
-    Scanner scanner(provider);
+TEST(Scanner, RegionFilters) {
+    Patchwork target;
+    target.add({0x1000, 0x1000, true, false, true, "code"}, filled_with_marker(0x1000, 0x10));
+    target.add({0x5000, 0x1000, true, true, false, "data"}, filled_with_marker(0x1000, 0x20));
+    target.add({0x9000, 0x1000, true, false, false, "rodata"}, filled_with_marker(0x1000, 0x30));
+    Scanner scanner(target);
+    const auto marker = Pattern::aob("DE AD BE EF");
 
-    ScanConfig config;
-    config.parallel = true;
-    config.thread_count = 4;
-    config.max_results = 3;
+    EXPECT_EQ(scanner.find(marker).size(), 3u);
+    ASSERT_EQ(scanner.find(marker, {.code_only = true}).size(), 1u);
+    EXPECT_EQ(scanner.find(marker, {.code_only = true})[0].region.name, "code");
+    EXPECT_EQ(scanner.find(marker, {.data_only = true})[0].address, 0x5020u);
+    EXPECT_EQ(scanner.find(marker, {.module = "RODATA"})[0].address, 0x9030u);
+    EXPECT_THROW(scanner.find(marker, {.module = "nope.dll"}), Error);
 
-    auto pattern = Pattern::fromAOB("DE AD BE EF", "parallel_cap");
-    auto result = scanner.scan(pattern, config);
+    ScanOptions custom;
+    custom.filter = [](const Region& r) { return r.base >= 0x5000; };
+    EXPECT_EQ(scanner.find(marker, custom).size(), 2u);
+}
 
-    ASSERT_EQ(result.matches.size(), 3);
-    EXPECT_TRUE(std::is_sorted(result.matches.begin(), result.matches.end(),
+TEST(Scanner, UnreadablePageDoesNotHideTheRestOfTheChunk) {
+    Patchwork target;
+    target.add({0x10000, 0x4000, true, true, false, "heap"}, filled_with_marker(0x4000, 0x3100));
+    target.hole(0x11000);
+    const auto result = Scanner(target).find(Pattern::aob("DE AD BE EF"));
+    ASSERT_EQ(result.size(), 1u);
+    EXPECT_EQ(result[0].address, 0x13100u);
+    EXPECT_EQ(result.bytes_scanned, 0x3000u);
+}
+
+TEST(Scanner, ParallelMaxKeepsLowestAndSorted) {
+    Patchwork target;
+    for (uintptr_t i = 0; i < 6; ++i)
+        target.add({0x10000 + i * 0x1000, 0x200, true, true, false, "seg"}, filled_with_marker(0x200, 0x10));
+    const auto result = Scanner(target).find(Pattern::aob("DE AD BE EF"),
+                                             {.max = 3, .parallel = true, .threads = 4});
+    ASSERT_EQ(result.size(), 3u);
+    EXPECT_TRUE(std::is_sorted(result.begin(), result.end(),
                                [](const Match& a, const Match& b) { return a.address < b.address; }));
 }
 
-TEST(ScannerRegressionTest, MultiScanDeduplicatesChunkOverlap) {
-    std::vector<uint8_t> buf(0x300, 0xCC);
-    buf[0x100] = 0xDE;
-    buf[0x101] = 0xAD;
-    buf[0x102] = 0xBE;
-    buf[0x103] = 0xEF;
+TEST(Scanner, CancelStopsEarly) {
+    auto image = sample();
+    std::atomic_bool cancel{true};
+    const auto result = Scanner(image).find(Pattern::aob("DE AD BE EF"), {.cancel = &cancel});
+    EXPECT_TRUE(result.cancelled);
+    EXPECT_TRUE(result.empty());
+}
 
-    auto provider = std::make_shared<BufferProvider>(std::move(buf), 0x10000);
-    Scanner scanner(provider);
+TEST(Scanner, FindsPointersAndValues) {
+    std::vector<uint8_t> bytes(0x100, 0);
+    const uint64_t pointer = 0x10040;
+    std::memcpy(bytes.data() + 0x20, &pointer, 8);
+    std::memcpy(bytes.data() + 0x80, &pointer, 8);
+    const float health = 87.5f;
+    std::memcpy(bytes.data() + 0xC0, &health, 4);
+    auto image = Image::from_bytes(std::move(bytes), 0x10000);
+    Scanner scanner(image);
 
-    ScanConfig config;
-    config.chunk_size = 0x100;
+    EXPECT_EQ(scanner.find_pointer(0x10040).size(), 2u);
+    const uintptr_t both[] = {0x10040, 0xDEAD};
+    const auto results = scanner.find_pointers(both);
+    EXPECT_EQ(results[0].size(), 2u);
+    EXPECT_TRUE(results[1].empty());
+    ASSERT_EQ(scanner.find(Pattern::value(health)).size(), 1u);
+    EXPECT_EQ(scanner.find(Pattern::value(health))[0].address, 0x100C0u);
+}
 
-    std::vector<Pattern> patterns = {
-        Pattern::fromAOB("DE AD BE EF", "overlap")
-    };
+TEST(Scanner, ProbeClassifiesFields) {
+    std::vector<uint8_t> bytes(0x200, 0);
+    const uint64_t to_string = 0x10100, small = 42, to_vtable = 0x10180, code = 0x10000;
+    std::memcpy(bytes.data() + 0x08, &to_string, 8);
+    std::memcpy(bytes.data() + 0x10, &small, 8);
+    std::memcpy(bytes.data() + 0x18, &to_vtable, 8);
+    std::memcpy(bytes.data() + 0x180, &code, 8);
+    std::memcpy(bytes.data() + 0x100, "PlayerName", 11);
+    auto image = Image::from_bytes(std::move(bytes), 0x10000);
 
-    auto result = scanner.scan(std::span<const Pattern>(patterns), config);
-    ASSERT_EQ(result.results.size(), 1);
-    ASSERT_EQ(result.results[0].matches.size(), 1);
-    EXPECT_EQ(result.results[0].matches[0].address, 0x10100);
+    const auto probe = Scanner(image).probe(0x10000, 0x20);
+    ASSERT_EQ(probe.fields.size(), 4u);
+    EXPECT_EQ(probe.fields[0].kind, FieldKind::Zero);
+    EXPECT_EQ(probe.fields[1].kind, FieldKind::String);
+    EXPECT_EQ(probe.fields[1].detail, "PlayerName");
+    EXPECT_EQ(probe.fields[2].kind, FieldKind::Integer);
+    EXPECT_EQ(probe.fields[3].kind, FieldKind::VTable);  // the image region is executable
+}
+
+TEST(Resolve, PointerChainAndRip) {
+    std::vector<uint8_t> bytes(0x100, 0);
+    const uint64_t a = 0x10040, b = 0x10080;
+    std::memcpy(bytes.data() + 0x10, &a, 8);
+    std::memcpy(bytes.data() + 0x48, &b, 8);
+    const int32_t back = -0x20;
+    std::memcpy(bytes.data() + 0xA0, &back, 4);
+    auto image = Image::from_bytes(std::move(bytes), 0x10000);
+
+    EXPECT_EQ(pointer_chain(image, 0x10000, {0x10, 0x8, 0x4}), 0x10084u);
+    EXPECT_FALSE(pointer_chain(image, 0x10000, {0x20, 0x0}));  // null pointer
+    EXPECT_EQ(rip_relative(image, 0x100A0), 0x100A4u - 0x20);
+}
+
+TEST(Target, Helpers) {
+    std::vector<uint8_t> bytes(0x40, 0);
+    std::memcpy(bytes.data() + 0x3C, "abcd", 4);  // no terminator before the end
+    auto image = Image::from_bytes(std::move(bytes), 0x1000, "blob");
+
+    EXPECT_EQ(image.read_string(0x103C), "abcd");
+    EXPECT_FALSE(image.read_string(0x2000));
+    EXPECT_TRUE(image.read_bytes(0x1030, 0x20).empty());
+    EXPECT_EQ(image.read<uint32_t>(0x103C), 0x64636261u);
+    ASSERT_TRUE(image.module("BLOB"));
+    EXPECT_EQ(image.module("blob")->base, 0x1000u);
+    EXPECT_EQ(image.region_at(0x1010)->name, "blob");
+    EXPECT_FALSE(image.region_at(0x1040));
+}
+
+TEST(Target, ModulesAreContiguousRuns) {
+    Patchwork target;
+    const std::vector<uint8_t> page(0x1000, 0);
+    target.add({0x10000, 0x1000, true, false, false, "lib.so"}, page);
+    target.add({0x11000, 0x1000, true, false, true, "lib.so"}, page);
+    target.add({0x13000, 0x1000, true, true, false, "lib.so"}, page);  // after an unreadable gap
+    target.add({0x14000, 0x1000, true, true, false, ""}, page);        // .bss
+    target.add({0x15000, 0x1000, true, true, false, ""}, page);        // .bss continues
+    target.add({0x30000, 0x1000, true, true, false, ""}, page);        // unrelated anonymous memory
+    target.add({0x40000, 0x1000, true, false, true, "other.so"}, page);
+    target.add({0x50000, 0x1000, true, false, true, "lib.so"}, page);  // stray second mapping
+
+    const auto lib = target.module("lib.so");
+    ASSERT_TRUE(lib);
+    EXPECT_EQ(lib->base, 0x10000u);
+    EXPECT_EQ(lib->end(), 0x16000u);
+    EXPECT_FALSE(target.module_at(0x30000));
+    EXPECT_EQ(target.module_at(0x40010)->name, "other.so");
+    EXPECT_FALSE(target.module_at(0x50000)) << "the stray mapping must not stretch lib.so";
+    EXPECT_EQ(target.modules().size(), 2u);
 }

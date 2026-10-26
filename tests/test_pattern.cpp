@@ -1,135 +1,98 @@
 #include <gtest/gtest.h>
-#include <patty/core/pattern.h>
-#include <patty/target/loader.h>
+#include <patty/error.h>
+#include <patty/profile/profile.h>
+#include <patty/scan/pattern.h>
 
 using namespace patty;
 
-TEST(PatternTest, ParseAOB_Basic) {
-    auto p = Pattern::fromAOB("48 8B 05");
-    ASSERT_EQ(p.bytes.size(), 3);
-    EXPECT_EQ(p.bytes[0].value, 0x48);
-    EXPECT_EQ(p.bytes[1].value, 0x8B);
-    EXPECT_EQ(p.bytes[2].value, 0x05);
-    EXPECT_FALSE(p.bytes[0].wildcard);
+TEST(Pattern, ParsesAob) {
+    const auto p = Pattern::aob("48 8b 05 ?? ? ** FF");
+    EXPECT_EQ(p.size(), 7u);
+    EXPECT_EQ(p.values()[1], 0x8B);
+    EXPECT_EQ(p.mask()[3], 0x00);
+    EXPECT_EQ(p.mask()[5], 0x00);
+    EXPECT_EQ(p.to_string(), "48 8B 05 ?? ?? ?? FF");
 }
 
-TEST(PatternTest, ParseAOB_Wildcards) {
-    auto p = Pattern::fromAOB("48 ?? 05 ? AA");
-    ASSERT_EQ(p.bytes.size(), 5);
-    EXPECT_FALSE(p.bytes[0].wildcard);
-    EXPECT_TRUE(p.bytes[1].wildcard);
-    EXPECT_FALSE(p.bytes[2].wildcard);
-    EXPECT_TRUE(p.bytes[3].wildcard);
-    EXPECT_FALSE(p.bytes[4].wildcard);
-    EXPECT_EQ(p.bytes[4].value, 0xAA);
+TEST(Pattern, AnchorIsFirstFixedByte) {
+    EXPECT_EQ(Pattern::aob("?? ?? E8 ?? ?? ?? ??").anchor(), 2u);
 }
 
-TEST(PatternTest, ParseAOB_WithName) {
-    auto p = Pattern::fromAOB("48 8B 05 ?? ?? ?? ??", "TestPattern");
-    EXPECT_EQ(p.name, "TestPattern");
-    ASSERT_EQ(p.bytes.size(), 7);
+TEST(Pattern, RejectsGarbage) {
+    EXPECT_THROW(Pattern::aob("48 8G"), Error);
+    EXPECT_THROW(Pattern::aob("488B"), Error);
+    EXPECT_THROW(Pattern::aob(""), Error);
+    EXPECT_THROW(Pattern::aob("?? ??"), Error);
 }
 
-TEST(PatternTest, ParseByteMask) {
-    uint8_t bytes[] = {0x48, 0x8B, 0x05, 0x00, 0x00};
-    auto p = Pattern::fromByteMask(bytes, "xx?..");
-    ASSERT_EQ(p.bytes.size(), 5);
-    EXPECT_FALSE(p.bytes[0].wildcard);
-    EXPECT_FALSE(p.bytes[1].wildcard);
-    EXPECT_TRUE(p.bytes[2].wildcard);
-    EXPECT_TRUE(p.bytes[3].wildcard);
-    EXPECT_TRUE(p.bytes[4].wildcard);
+TEST(Pattern, RawWithMask) {
+    const uint8_t bytes[] = {0x48, 0x8B, 0x05, 0x00};
+    const auto p = Pattern::raw(bytes, "xx?x");
+    EXPECT_EQ(p.to_string(), "48 8B ?? 00");
+    EXPECT_THROW(Pattern::raw(bytes, "xx"), Error);
 }
 
-TEST(PatternTest, IsValid) {
-    auto p1 = Pattern::fromAOB("48 8B");
-    EXPECT_TRUE(p1.isValid());
-
-    auto p2 = Pattern::fromAOB("?? ??");
-    EXPECT_FALSE(p2.isValid());
-
-    Pattern p3;
-    EXPECT_FALSE(p3.isValid());
+TEST(Pattern, TextAndValues) {
+    EXPECT_EQ(Pattern::text("Hi").to_string(), "48 69");
+    EXPECT_EQ(Pattern::integer(0x1234, 2).to_string(), "34 12");
+    EXPECT_EQ(Pattern::value(uint32_t{0xC0FFEE}).to_string(), "EE FF C0 00");
+    EXPECT_THROW(Pattern::integer(1, 9), Error);
 }
 
-TEST(PatternTest, MatchAt) {
-    auto p = Pattern::fromAOB("48 8B ?? 05");
-    uint8_t data[] = {0x48, 0x8B, 0xFF, 0x05, 0x00};
+TEST(Pattern, MsvcStringInlineAndHeap) {
+    const auto small = Pattern::msvc_string("Hello");
+    ASSERT_EQ(small.size(), 32u);
+    EXPECT_EQ(small.values()[0], 'H');
+    EXPECT_EQ(small.mask()[5], 0xFF);   // terminator is fixed
+    EXPECT_EQ(small.mask()[6], 0x00);   // rest of the buffer is not
+    EXPECT_EQ(small.values()[16], 5);   // size
+    EXPECT_EQ(small.values()[24], 15);  // inline capacity
 
-    EXPECT_TRUE(p.matchAt(data, sizeof(data)));
-
-    uint8_t data2[] = {0x48, 0x8B, 0xFF, 0x06, 0x00};
-    EXPECT_FALSE(p.matchAt(data2, sizeof(data2)));
+    const auto big = Pattern::msvc_string("this one does not fit inline");
+    EXPECT_EQ(big.mask()[0], 0x00);     // heap pointer
+    EXPECT_EQ(big.values()[16], 28);
+    EXPECT_EQ(big.mask()[24], 0x00);    // capacity unknown
 }
 
-TEST(PatternTest, MatchAt_TooShort) {
-    auto p = Pattern::fromAOB("48 8B 05");
-    uint8_t data[] = {0x48, 0x8B};
-    EXPECT_FALSE(p.matchAt(data, sizeof(data)));
+TEST(Pattern, BuilderChains) {
+    const auto p = Pattern::aob("48 8B 05 ?? ?? ?? ??").rip(3).deref().add(8).named("Player");
+    EXPECT_EQ(p.name(), "Player");
+    ASSERT_EQ(p.steps().size(), 4u);
+    EXPECT_EQ(p.steps()[0], (ResolveStep{ResolveStep::Kind::Add, 3}));
+    EXPECT_EQ(p.steps()[1].kind, ResolveStep::Kind::Rip);
+    EXPECT_EQ(p.steps()[2].kind, ResolveStep::Kind::Deref);
+    EXPECT_EQ(p.steps()[3], (ResolveStep{ResolveStep::Kind::Add, 8}));
 }
 
-TEST(PatternTest, BuilderPattern) {
-    auto p = Pattern::fromAOB("48 8B 05 ?? ?? ?? ??")
-        .withName("Test")
-        .withOffset(3)
-        .withResolve(ResolveType::RIPRelative)
-        .withDescription("Test pattern");
+TEST(Profile, ParsesAllPatternKinds) {
+    const auto profile = Profile::parse(R"({
+        "name": "Game", "version": "1.2", "module": "Game.exe",
+        "patterns": [
+            {"name": "World", "aob": "48 8B 05 ?? ?? ?? ??", "result_offset": 3, "resolve": ["rip"]},
+            {"name": "Sig", "ida": "E8 ? ? ? ?", "resolve": [{"type": "add", "extra": 1}, "rip_relative"]},
+            {"name": "Banner", "string": "patty"},
+            {"name": "Label", "sso_string": "Hi"}
+        ]})");
 
-    EXPECT_EQ(p.name, "Test");
-    EXPECT_EQ(p.result_offset, 3);
-    ASSERT_EQ(p.resolve_chain.size(), 1);
-    EXPECT_EQ(p.resolve_chain[0].type, ResolveType::RIPRelative);
-    EXPECT_EQ(p.description, "Test pattern");
+    EXPECT_EQ(profile.name, "Game");
+    EXPECT_EQ(profile.module, "Game.exe");
+    ASSERT_EQ(profile.patterns.size(), 4u);
+    EXPECT_EQ(profile.patterns[0].steps().size(), 2u);  // result_offset becomes an add step
+    EXPECT_EQ(profile.patterns[1].steps()[0], (ResolveStep{ResolveStep::Kind::Add, 1}));
+    EXPECT_EQ(profile.patterns[2].to_string(), "70 61 74 74 79");
+    EXPECT_EQ(profile.patterns[3].size(), 32u);
 }
 
-TEST(PatternTest, InvalidHex) {
-    EXPECT_THROW(Pattern::fromAOB("ZZ"), std::invalid_argument);
-}
-
-TEST(PatternTest, EmptyPattern) {
-    auto p = Pattern::fromAOB("");
-    EXPECT_TRUE(p.bytes.empty());
-    EXPECT_FALSE(p.isValid());
-}
-
-TEST(PatternTest, CaseInsensitiveHex) {
-    auto p1 = Pattern::fromAOB("aB cD eF");
-    auto p2 = Pattern::fromAOB("AB CD EF");
-    ASSERT_EQ(p1.bytes.size(), p2.bytes.size());
-    for (size_t i = 0; i < p1.bytes.size(); ++i) {
-        EXPECT_EQ(p1.bytes[i].value, p2.bytes[i].value);
+TEST(Profile, ErrorsNameThePattern) {
+    try {
+        Profile::parse(R"({"patterns": [{"name": "A", "aob": "90"}, {"name": "Broken", "aob": "ZZ"}]})");
+        FAIL() << "expected patty::Error";
+    } catch (const Error& e) {
+        const std::string message = e.what();
+        EXPECT_NE(message.find("#2 (Broken)"), std::string::npos) << message;
+        EXPECT_NE(message.find("ZZ"), std::string::npos) << message;
     }
-}
-
-
-TEST(ProfileLoaderTest, ParsesStringPatternFromJson) {
-    auto profile = ProfileLoader::fromJSON(R"JSON({
-        "name": "strings",
-        "patterns": [
-            {"name": "literal", "string": "PlayerName"}
-        ]
-    })JSON");
-
-    ASSERT_TRUE(profile.has_value());
-    ASSERT_EQ(profile->patterns.size(), 1);
-    EXPECT_EQ(profile->patterns[0].name, "literal");
-    ASSERT_EQ(profile->patterns[0].bytes.size(), 10);
-    EXPECT_EQ(profile->patterns[0].bytes[0].value, 'P');
-    EXPECT_FALSE(profile->patterns[0].bytes[0].wildcard);
-}
-
-TEST(ProfileLoaderTest, ParsesSsoStringPatternFromJson) {
-    auto profile = ProfileLoader::fromJSON(R"JSON({
-        "name": "strings",
-        "patterns": [
-            {"name": "literal", "sso_string": "Hello"}
-        ]
-    })JSON");
-
-    ASSERT_TRUE(profile.has_value());
-    ASSERT_EQ(profile->patterns.size(), 1);
-    EXPECT_EQ(profile->patterns[0].name, "literal");
-    ASSERT_EQ(profile->patterns[0].bytes.size(), 32);
-    EXPECT_EQ(profile->patterns[0].bytes[0].value, 'H');
-    EXPECT_FALSE(profile->patterns[0].bytes[0].wildcard);
+    EXPECT_THROW(Profile::parse("{not json"), Error);
+    EXPECT_THROW(Profile::parse(R"({"patterns": [{"name": "x"}]})"), Error);
+    EXPECT_THROW(Profile::load("/nonexistent/profile.json"), Error);
 }

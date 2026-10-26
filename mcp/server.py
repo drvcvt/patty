@@ -35,6 +35,7 @@ def _find_patty_exe() -> str:
     if exe := os.environ.get("PATTY_EXE"):
         return exe
     candidates = [
+        Path(__file__).parent.parent / "build" / "patty",
         Path(__file__).parent.parent / "build_release" / "patty.exe",
         Path(__file__).parent.parent / "build" / "patty.exe",
         Path(__file__).parent.parent / "build_test" / "patty.exe",
@@ -51,9 +52,14 @@ mcp = FastMCP(
     "patty",
     instructions=(
         "Universal memory pattern scanner. Use these tools to scan live "
-        "Windows processes or binary files for byte patterns, numeric values, "
-        "pointers, and object layouts. Supports RIP-relative resolution, "
-        "profile loading, and CLI-backed MCP automation."
+        "processes (Windows, Linux incl. Wine/Proton games) or binary files for "
+        "byte patterns, numeric values, pointers, and object layouts. Supports "
+        "RIP-relative resolution, profile loading, and check_profile to verify "
+        "that a profile's signatures still match uniquely after a target update. "
+        "Read-only: Linux uses process_vm_readv only (no ptrace attach), but the "
+        "kernel still wants CAP_SYS_PTRACE under kernel.yama.ptrace_scope >= 1; "
+        "scripts/setup.sh grants it and the error message says so. Files are "
+        "mapped like a loader would, so addresses match IDA."
     ),
 )
 
@@ -406,7 +412,7 @@ def scan_process(
     thread_count: Optional[int] = None,
     chunk_size: Optional[int] = None,
 ) -> str:
-    """Scan a live Windows process for a byte pattern (AOB signature)."""
+    """Scan a live process for a byte pattern (AOB signature)."""
     args = [
         "scan",
         "--name",
@@ -527,6 +533,27 @@ def scan_with_profile(
         ),
     ]
     return _json(_scan_cli(args))
+
+
+@mcp.tool()
+def check_profile(
+    profile_path: str,
+    name: Optional[str] = None,
+    pid: Optional[int] = None,
+    file_path: Optional[str] = None,
+    module: Optional[str] = None,
+    max_results: Optional[int] = None,
+) -> str:
+    """Check every signature in a target profile: ok (unique value), ambiguous, or missing.
+
+    Reports each ok signature's value and RVA. For processes the profile's module is
+    used unless `module` overrides it; for files the RVA is relative to the image base.
+    """
+    target_args, error = _target_args(name=name, pid=pid, file_path=file_path)
+    if error:
+        return _json(error)
+    args = ["check", *target_args, "--profile", profile_path, *_scan_common_args(module=module, max_results=max_results)]
+    return _json(_run_patty_json(args))
 
 
 @mcp.tool()

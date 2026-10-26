@@ -1,24 +1,20 @@
 #pragma once
 
+// patty: read-only memory pattern scanning for processes and binaries.
+
 #include <patty/version.h>
 
-#include "core/pattern.h"
-#include "core/scanner.h"
-#include "core/match.h"
+#include "error.h"
 
-#include "memory/provider.h"
-#include "memory/buffer.h"
-#include "memory/file.h"
-#ifdef _WIN32
+#include "memory/region.h"
+#include "memory/target.h"
+#include "memory/image.h"
 #include "memory/process.h"
-#endif
 
-#include "region/region.h"
-#include "region/filter.h"
+#include "scan/pattern.h"
+#include "scan/match.h"
+#include "scan/resolve.h"
+#include "scan/scanner.h"
 
-#include "resolve/rip_relative.h"
-#include "resolve/pointer_chain.h"
-#include "resolve/validator.h"
-
-#include "target/profile.h"
-#include "target/loader.h"
+#include "profile/profile.h"
+#include "profile/check.h"
