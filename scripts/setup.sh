@@ -5,27 +5,27 @@ set -euo pipefail
 
 usage() {
     cat <<'EOF'
-usage: scripts/setup.sh [--prefix DIR] [--no-setcap] [--no-mcp] [--jobs N]
+usage: scripts/setup.sh [--prefix DIR] [--no-setcap] [--mcp] [--jobs N]
 
   --prefix DIR   install location (default ~/.local)
   --no-setcap    skip the capability step, no sudo at all
-  --no-mcp       skip the Python venv for the MCP server
+  --mcp          also set up the optional MCP server (Python venv in mcp/.venv)
   --jobs N       parallel build jobs (default 4)
 
-Steps: MCP venv, configure, build, test, install, then
-sudo setcap cap_sys_ptrace=ep on the installed binary and build/patty.
+Steps: configure, build, test, install, then sudo setcap cap_sys_ptrace=ep
+on the installed binary and build/patty. With --mcp, the venv comes first.
 EOF
 }
 
 prefix="$HOME/.local"
 want_setcap=1
-want_mcp=1
+want_mcp=0
 jobs=4
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --prefix)     prefix="${2:?--prefix needs a directory}"; shift 2 ;;
         --no-setcap)  want_setcap=0; shift ;;
-        --no-mcp)     want_mcp=0; shift ;;
+        --mcp)        want_mcp=1; shift ;;
         --jobs)       jobs="${2:?--jobs needs a number}"; shift 2 ;;
         -h|--help)    usage; exit 0 ;;
         *)            usage >&2; exit 2 ;;
@@ -48,9 +48,12 @@ quiet() {
 
 # --- preflight -----------------------------------------------------------
 
-for tool in cmake ninja python3; do
+for tool in cmake ninja; do
     command -v "$tool" >/dev/null || die "$tool is missing"
 done
+if (( want_mcp )); then
+    command -v python3 >/dev/null || die "python3 is missing (needed for --mcp)"
+fi
 command -v c++ >/dev/null || command -v g++ >/dev/null || command -v clang++ >/dev/null \
     || die "no C++ compiler (c++, g++ or clang++)"
 
@@ -81,7 +84,7 @@ if (( want_setcap )); then
     fi
 fi
 
-# --- MCP server ----------------------------------------------------------
+# --- MCP server (optional) -----------------------------------------------
 
 if (( want_mcp )); then
     step "MCP server venv"
@@ -134,6 +137,9 @@ case ":$PATH:" in
     *":$prefix/bin:"*) ;;
     *) printf '%s/bin is not on your PATH yet:  export PATH="%s/bin:$PATH"\n' "$prefix" "$prefix" ;;
 esac
+if (( want_mcp )); then
+    echo "MCP server ready, see mcp/README.md for the client config."
+fi
 cat <<EOF
 
   patty                         interactive shell
