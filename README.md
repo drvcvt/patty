@@ -181,7 +181,8 @@ patty dump  --name Game.exe --address 0x7FF6A0010000 --size 0x1000 -o text.bin
 ```
 
 All scan commands take `--code-only`, `--data-only`, `--module`, `--region`
-(a section name such as `.text` for files), `--max` and `--parallel`.
+(a section name such as `.text` for files), `--max` and `--threads`. Scans use
+all cores by default; `--threads 1` keeps them on one.
 `-o json` prints machine readable output with `"schema_version": 2`.
 
 Exit codes: `0` found something, `2` found nothing (or `check` was not all ok),
@@ -299,7 +300,7 @@ target has 40.0 hp
 |---|---|
 | `Process` | `open(pid)`, `open("Game.exe")`, `current()`, `find(name)` |
 | `Image` | `open(path)` maps PE/ELF like a loader, `open_raw(path, base)`, `from_bytes(bytes, base)` |
-| `Target` | what both share: `read<T>`, `read_pointer`, `read_string`, `read_bytes`, `regions`, `modules`, `module(name)`, `region_at` |
+| `Target` | what both share: `read<T>`, `read_pointer`, `read_string`, `read_bytes`, `view` (zero-copy), `regions`, `modules`, `module(name)`, `region_at` |
 | `Pattern` | `aob`, `text`, `raw(bytes, mask)`, `integer(v, size)`, `value(x)`, `msvc_string`; chain `.rip(n)`, `.deref()`, `.add(n)`, `.named(s)` |
 | `Scanner` | `find(pattern)` or `find(patterns)` in one pass, `find_pointer(s)`, `probe`, `check(profile)` |
 | `ScanOptions` | `module`, `code_only`, `data_only`, `max`, `parallel`, `threads`, `filter`, `cancel` |
@@ -316,9 +317,12 @@ A few rules the API sticks to:
 - `Scanner` borrows the target. Keep the target alive while you scan.
 - Matches come back sorted by address. `Match::resolved` is only set when the
   pattern has resolve steps, and `Match::value()` gives you whichever applies.
+- Scans use all cores unless `ScanOptions::parallel` is false or `threads` is 1.
 - `ScanOptions::cancel` takes a `std::atomic_bool*`, checked once per chunk.
 - To scan something else (a dump format, remote memory, a DMA device),
-  derive from `Target` and implement `read`, `regions` and `describe`.
+  derive from `Target` and implement `read`, `regions` and `describe`. If the
+  bytes already sit in your process, also implement `view` and the scanner
+  reads them in place.
 
 ## MCP server
 
@@ -366,17 +370,32 @@ scripts/setup.sh  build, test, install, setcap
 
 ## Speed
 
-Measured on an i5-12400F (6 cores, 12 threads), release build:
+i5-12400F (6 cores, 12 threads, AVX2), release build, best of five runs on a
+machine that was busy with other work at the time:
 
-| | single thread | `--parallel` |
+| | one thread | all cores (default) |
 |---|---|---|
-| 154 MiB file (libLLVM), pattern starts with a rare byte | ~10 GB/s | ~12.7 GB/s |
-| same file, `48 8B 05 ?? ?? ?? ?? 48 85 C0`, 309 matches | ~2.2 GB/s | ~10 GB/s |
-| 529 MiB of a live process | ~6 to 7 GB/s | ~12.7 GB/s |
+| 154 MiB binary (libLLVM), one signature | 11 to 12 ms | 4.4 to 5 ms |
+| same binary, profile with 20 signatures | 98 ms | 16 ms |
+| 1 GiB of a live process, one signature | 163 ms | 41 ms |
+| same process, 20 signatures | 750 ms | 115 ms |
+| opening that 154 MiB binary | 2 ms | |
 
-The scanner jumps between occurrences of the first fixed byte with `memchr`.
-Signatures that start with a rare byte are therefore the fastest ones; a
-leading `48` costs real time in big code sections, where `--parallel` helps.
+Where it comes from:
+
+- For every signature patty picks the two fixed bytes that are rarest in real
+  x86-64 binaries and compares both for 64 positions at a time with AVX2
+  (SSE2 or plain `memchr` where AVX2 is missing). Only positions where both
+  agree get the full comparison, so a signature starting with `48` or `00` is
+  as fast as any other: around 20 GB/s per core, which is what one core can
+  pull from memory.
+- Binaries on disk are memory-mapped and scanned in place, nothing is copied.
+- Live memory is copied with `process_vm_readv` in 256 KiB pieces on all
+  cores, small enough to stay in each core's L2 cache. On a single core about
+  two thirds of the time is the kernel copying memory, which is why the
+  default spreads the work.
+- Several signatures are scanned in one pass over memory: each piece is
+  checked against all of them while it is still in cache.
 
 ## Limits
 
