@@ -19,10 +19,8 @@ int nibble(char c) {
 } // namespace
 
 void Pattern::finish() {
-    const auto first = std::find(m_mask.begin(), m_mask.end(), uint8_t{0xFF});
-    if (first == m_mask.end())
+    if (std::find(m_mask.begin(), m_mask.end(), uint8_t{0xFF}) == m_mask.end())
         throw Error(m_values.empty() ? "empty pattern" : "pattern has no fixed byte");
-    m_anchor = static_cast<size_t>(first - m_mask.begin());
 }
 
 Pattern Pattern::aob(std::string_view text) {

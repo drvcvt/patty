@@ -73,9 +73,6 @@ public:
     std::span<const uint8_t> mask() const { return m_mask; }
     std::span<const ResolveStep> steps() const { return m_steps; }
 
-    // Index of the first fixed byte; the scanner searches for this one first.
-    size_t anchor() const { return m_anchor; }
-
     bool matches(const uint8_t* data) const {
         for (size_t i = 0; i < m_values.size(); ++i)
             if ((data[i] & m_mask[i]) != m_values[i])
@@ -94,7 +91,6 @@ private:
     std::vector<uint8_t> m_values;
     std::vector<uint8_t> m_mask;
     std::vector<ResolveStep> m_steps;
-    size_t m_anchor = 0;
 };
 
 } // namespace patty

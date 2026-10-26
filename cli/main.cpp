@@ -22,9 +22,9 @@ void add_scan(CLI::App* app, ScanArgs& scan) {
     app->add_option("--module", scan.module, "Only inside this module");
     app->add_option("--region", scan.region, "Only regions with this name (e.g. .text of a file)");
     app->add_option("--max", scan.max, "Matches per pattern (0 = all)");
-    app->add_flag("--parallel", scan.parallel, "Scan on several threads");
-    app->add_option("--threads", scan.threads, "Thread count for --parallel (0 = all cores)");
-    app->add_option("--chunk-size", scan.chunk_size, "Bytes read per step (default 2 MiB)");
+    app->add_flag("--parallel", scan.parallel, "Accepted for compatibility, scans are parallel by default");
+    app->add_option("--threads", scan.threads, "Worker threads (0 = all cores, 1 = single thread)");
+    app->add_option("--chunk-size", scan.chunk_size, "Bytes read per step (default 256 KiB)");
     app->add_option("--output,-o", scan.output, "table or json");
 }
 

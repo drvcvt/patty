@@ -3,9 +3,9 @@
 #include "patty/scan/resolve.h"
 
 #include "../util.h"
+#include "kernel.h"
 
 #include <algorithm>
-#include <array>
 #include <chrono>
 #include <cstring>
 #include <mutex>
@@ -48,10 +48,10 @@ public:
     Search(Target& target, std::span<const Pattern> patterns, const ScanOptions& options)
         : m_target(target), m_patterns(patterns), m_options(options),
           m_regions(select_regions(target, options)), m_counts(patterns.size()) {
-        for (const auto& p : patterns)
+        for (const auto& p : patterns) {
             m_longest = std::max(m_longest, p.size());
-        for (size_t i = 0; i < patterns.size(); ++i)
-            m_by_anchor[patterns[i].values()[patterns[i].anchor()]].push_back(i);
+            m_needles.emplace_back(p);
+        }
         const size_t chunk = std::max<size_t>(m_options.chunk_size, kPageSize);
         for (size_t r = 0; r < m_regions.size(); ++r)
             for (size_t offset = 0; offset < m_regions[r].size; offset += chunk)
@@ -63,8 +63,10 @@ public:
         const auto start = std::chrono::steady_clock::now();
         m_results.resize(m_patterns.size());
 
+        // Spinning up threads costs more than a few chunks of scanning.
+        constexpr size_t kMinChunksForThreads = 4;
         size_t threads = 1;
-        if (m_options.parallel) {
+        if (m_options.parallel && m_work.size() >= kMinChunksForThreads) {
             threads = m_options.threads ? m_options.threads : std::thread::hardware_concurrency();
             threads = std::clamp<size_t>(threads, 1, std::max<size_t>(m_work.size(), 1));
         }
@@ -101,11 +103,16 @@ public:
 
 private:
     struct Work { size_t region; size_t offset; };
-    using Local = std::vector<std::vector<Match>>;
+    // Per-thread state, merged once the thread is done.
+    struct Local {
+        std::vector<std::vector<Match>> matches;
+        std::vector<size_t> starts;  // reused kernel output
+    };
 
     void worker() {
         std::vector<uint8_t> buffer(m_chunk + m_longest);
-        Local local(m_patterns.size());
+        Local local;
+        local.matches.resize(m_patterns.size());
         size_t bytes = 0;
 
         while (!m_stop.load(std::memory_order_relaxed)) {
@@ -123,14 +130,21 @@ private:
             // but only accept matches that start inside the chunk.
             const size_t length = std::min(m_chunk + m_longest - 1, region.size - work.offset);
             const size_t limit = std::min(m_chunk, length);
-            bytes += read_and_scan(region, region.base + work.offset, length, limit, buffer, local);
+            const uintptr_t at = region.base + work.offset;
+            // In-memory targets (images) are scanned in place, no copy.
+            if (const auto direct = m_target.view(at, length); !direct.empty()) {
+                scan(region, direct.data(), length, at, limit, local);
+                bytes += limit;
+            } else {
+                bytes += read_and_scan(region, at, length, limit, buffer, local);
+            }
         }
 
         std::lock_guard lock(m_mutex);
         m_bytes += bytes;
-        for (size_t i = 0; i < local.size(); ++i)
-            m_results[i].insert(m_results[i].end(), std::make_move_iterator(local[i].begin()),
-                                std::make_move_iterator(local[i].end()));
+        for (size_t i = 0; i < local.matches.size(); ++i)
+            m_results[i].insert(m_results[i].end(), std::make_move_iterator(local.matches[i].begin()),
+                                std::make_move_iterator(local.matches[i].end()));
     }
 
     // Returns the number of bytes inside [0, limit) that could be read.
@@ -167,45 +181,17 @@ private:
         return bytes;
     }
 
+    // One kernel pass per pattern while the chunk is still in cache.
     void scan(const Region& region, const uint8_t* data, size_t length, uintptr_t at,
               size_t limit, Local& local) {
-        if (m_patterns.size() == 1) {
-            scan_one(region, data, length, at, limit, local);
-            return;
-        }
-        for (size_t pos = 0; pos < length; ++pos) {
-            for (size_t index : m_by_anchor[data[pos]]) {
-                const Pattern& p = m_patterns[index];
-                if (pos < p.anchor())
-                    continue;
-                const size_t start = pos - p.anchor();
-                if (start >= limit || start + p.size() > length || !p.matches(data + start))
-                    continue;
-                record(index, region, at + start, local);
-            }
-        }
-    }
-
-    // Single pattern: let memchr find the anchor byte.
-    void scan_one(const Region& region, const uint8_t* data, size_t length, uintptr_t at,
-                  size_t limit, Local& local) {
-        const Pattern& p = m_patterns[0];
-        if (length < p.size())
-            return;
-        const size_t last = std::min(limit - 1, length - p.size());
-        const uint8_t anchor = p.values()[p.anchor()];
-        const uint8_t* cursor = data + p.anchor();
-        const uint8_t* stop = data + last + p.anchor();
-
-        while (cursor <= stop) {
-            const auto* hit = static_cast<const uint8_t*>(
-                std::memchr(cursor, anchor, static_cast<size_t>(stop - cursor) + 1));
-            if (!hit)
-                break;
-            const uint8_t* start = hit - p.anchor();
-            if (p.matches(start) && !record(0, region, at + static_cast<size_t>(start - data), local))
-                break;
-            cursor = hit + 1;
+        for (size_t index = 0; index < m_needles.size(); ++index) {
+            if (m_options.max && m_counts[index].load(std::memory_order_relaxed) >= m_options.max)
+                continue;
+            local.starts.clear();
+            detail::find_matches(m_needles[index], {data, length}, limit, local.starts);
+            for (const size_t start : local.starts)
+                if (!record(index, region, at + start, local))
+                    break;
         }
     }
 
@@ -224,7 +210,7 @@ private:
             match.resolved = resolve(m_target, address, p.steps());
             match.resolve_failed = !match.resolved;
         }
-        local[index].push_back(std::move(match));
+        local.matches[index].push_back(std::move(match));
         return true;
     }
 
@@ -240,7 +226,7 @@ private:
     const ScanOptions& m_options;
     std::vector<Region> m_regions;
     std::vector<Work> m_work;
-    std::array<std::vector<size_t>, 256> m_by_anchor;
+    std::vector<detail::Needle> m_needles;
     size_t m_longest = 0;
     size_t m_chunk = 0;
 

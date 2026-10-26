@@ -87,10 +87,12 @@ endif()
 
 set(PATTY_SOURCES
     src/memory/image.cpp
+    src/memory/mapped_file.cpp
     src/memory/target.cpp
     src/profile/check.cpp
     src/profile/profile.cpp
     src/scan/pattern.cpp
+    src/scan/kernel.cpp
     src/scan/probe.cpp
     src/scan/resolve.cpp
     src/scan/scanner.cpp
@@ -220,7 +222,10 @@ if(PATTY_BUILD_TESTS)
         tests/test_scanner.cpp
         tests/test_image.cpp
         tests/test_check.cpp
+        tests/test_kernel.cpp
     )
+    # test_kernel.cpp checks the private search kernels directly.
+    target_include_directories(patty_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_sources(patty_tests PRIVATE tests/test_process_linux.cpp)
     endif()

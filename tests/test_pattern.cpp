@@ -14,10 +14,6 @@ TEST(Pattern, ParsesAob) {
     EXPECT_EQ(p.to_string(), "48 8B 05 ?? ?? ?? FF");
 }
 
-TEST(Pattern, AnchorIsFirstFixedByte) {
-    EXPECT_EQ(Pattern::aob("?? ?? E8 ?? ?? ?? ??").anchor(), 2u);
-}
-
 TEST(Pattern, RejectsGarbage) {
     EXPECT_THROW(Pattern::aob("48 8G"), Error);
     EXPECT_THROW(Pattern::aob("488B"), Error);

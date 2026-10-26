@@ -81,7 +81,8 @@ ScanOptions scan_options(const ScanArgs& args) {
     options.code_only = args.code_only;
     options.data_only = args.data_only;
     options.module = args.module;
-    options.parallel = args.parallel;
+    // Parallel is the default; --threads 1 is the way to stay on one thread.
+    options.parallel = args.threads != 1;
     options.max = std::min(args.max, kMaxResults);
     options.threads = std::min(args.threads, kMaxThreads);
     if (args.chunk_size)

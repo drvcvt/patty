@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -35,6 +36,11 @@ public:
 
     // Short human-readable label, e.g. "pid 4242 (Game.exe)" or "Game.exe (PE)".
     virtual std::string describe() const = 0;
+
+    // Direct access to `size` bytes at `address` without copying, valid as
+    // long as the target lives. Empty when the target cannot offer that
+    // (live processes) or the range is not contiguous in memory; use read().
+    virtual std::span<const uint8_t> view(uintptr_t /*address*/, size_t /*size*/) { return {}; }
 
     template <typename T>
     std::optional<T> read(uintptr_t address) {
