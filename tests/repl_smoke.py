@@ -1,4 +1,5 @@
 """Pipes a session into `patty repl` and checks the transcript."""
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -21,6 +22,10 @@ p nonsense
 p $99
 x/q 0
 bogus
+fnid 00
+open {fixture}
+find -r 0 40 00 00 00
+ps patty
 quit
 info
 '''
@@ -44,8 +49,13 @@ expected = [
     'error: $99 does not exist',
     "error: unknown x format letter 'q'",
     'unknown command "bogus"',
+    'unknown command "fnid", did you mean find?',
+    '$1    0x0000000000000050  patty-smoke.bin+0x50 r-x',
+    '0x0000000000000020 -> 0x0000000000000064',  # -r 0: rel32 at the match itself
 ]
 for line in expected:
     assert line in out, f'missing {line!r} in:\n{out}'
+assert out.count('opened patty-smoke.bin (raw)') == 2, out  # start + open
+assert re.search(r'^\s*\d+  patty$', out, re.M), 'ps did not list patty itself:\n' + out
 assert 'readable' not in out, 'commands after quit ran:\n' + out
 print('repl-smoke-ok')

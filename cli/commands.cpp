@@ -3,7 +3,9 @@
 
 #include <algorithm>
 #include <charconv>
+#include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 
 namespace patty::cli {
@@ -59,6 +61,19 @@ void apply_profile_module(ScanOptions& options, const Profile& profile, Target& 
         options.module = image->name();
     else if (profile.module)
         options.module = *profile.module;
+}
+
+TargetArgs guess_target(std::string_view text, bool raw) {
+    TargetArgs args;
+    args.raw = raw;
+    std::error_code ec;
+    if (const auto pid = parse_number(text); pid && *pid > 0 && *pid < 0x100000000)
+        args.pid = static_cast<uint32_t>(*pid);
+    else if (std::filesystem::is_regular_file(std::string(text), ec))
+        args.file = text;
+    else
+        args.name = text;
+    return args;
 }
 
 std::unique_ptr<Target> open_target(const TargetArgs& args) {
@@ -255,6 +270,21 @@ int cmd_check(const TargetArgs& target_args, const ScanArgs& scan, const std::st
         print_check(std::cout, check, target->pointer_size());
     }
     return check.all_ok() ? 0 : 2;
+}
+
+int cmd_ps(const std::string& filter) {
+    const auto wanted = [&](const ProcessInfo& p) {
+        auto lower = [](std::string text) {
+            for (auto& c : text)
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            return text;
+        };
+        return filter.empty() || lower(p.name).find(lower(filter)) != std::string::npos;
+    };
+    for (const auto& process : Process::list())
+        if (wanted(process))
+            std::cout << std::setw(8) << process.pid << "  " << process.name << '\n';
+    return 0;
 }
 
 } // namespace patty::cli

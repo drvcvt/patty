@@ -36,6 +36,9 @@ struct PatternArgs {
     int64_t offset = 0;
 };
 
+// "4242" is a pid, an existing file is a file, anything else a process name.
+TargetArgs guess_target(std::string_view text, bool raw = false);
+
 // Throws patty::Error unless exactly one of pid/name/file is set.
 std::unique_ptr<Target> open_target(const TargetArgs& args);
 
@@ -60,6 +63,7 @@ int cmd_probe(const TargetArgs& target, const std::string& address, size_t size,
 int cmd_list(const TargetArgs& target, bool modules, const std::string& output);
 int cmd_dump(const TargetArgs& target, const std::string& address, size_t size, const std::string& path);
 int cmd_check(const TargetArgs& target, const ScanArgs& scan, const std::string& profile);
+int cmd_ps(const std::string& filter);
 
 // Interactive session; `target` may be empty.
 int run_repl(const TargetArgs& target);

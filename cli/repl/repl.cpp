@@ -85,7 +85,7 @@ void complete(ic_completion_env_t* env, const char* input) {
         return;
     }
     const auto command = line.substr(0, first_space);
-    if (command == "file" || command == "load" || command == "dump") {
+    if (command == "file" || command == "load" || command == "dump" || command == "open") {
         ic_complete_filename(env, input, 0, nullptr, nullptr);
         return;
     }
@@ -102,6 +102,8 @@ int interactive(Session& session) {
     ic_set_default_completer(&complete, nullptr);
 
     std::cout << "patty " << version_string << ". help lists commands, Ctrl-C stops a scan.\n";
+    if (!session.has_target())
+        std::cout << "open a target with: open <pid|name|file>   (ps lists processes)\n";
     bool interrupted_once = false;
     while (true) {
         char* raw = ic_readline(session.prompt().c_str());

@@ -33,10 +33,11 @@ json modules_json(const std::vector<Module>& modules, size_t pointer_size);
 
 // `label` lets the REPL put "$3" in front of each match.
 using MatchLabel = std::function<std::string(const Match&)>;
+// `note` replaces the region name at the end of each line (the shell shows module+offset).
 void print_matches(std::ostream& out, const ScanResult& result, size_t pointer_size,
-                   const MatchLabel& label = {});
+                   const MatchLabel& label = {}, const MatchLabel& note = {});
 void print_results(std::ostream& out, std::span<const ScanResult> results, size_t pointer_size,
-                   const MatchLabel& label = {});
+                   const MatchLabel& label = {}, const MatchLabel& note = {});
 void print_regions(std::ostream& out, const std::vector<Region>& regions, size_t pointer_size);
 void print_modules(std::ostream& out, const std::vector<Module>& modules, size_t pointer_size);
 void print_probe(std::ostream& out, const Probe& probe, size_t pointer_size);

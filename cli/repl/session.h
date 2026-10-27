@@ -28,6 +28,7 @@ public:
     void open(const TargetArgs& args);
 
     std::string prompt() const;
+    bool has_target() const { return m_target != nullptr; }
     std::atomic_bool& cancel_flag() { return m_cancel; }
 
     // For tab completion.
@@ -65,6 +66,8 @@ private:
 
     // session.cpp
     void cmd_help(Args& args);
+    void cmd_open(Args& args);
+    void cmd_ps(Args& args);
     void cmd_proc(Args& args);
     void cmd_file(Args& args);
     void cmd_close(Args& args);
@@ -90,6 +93,11 @@ private:
     std::string remember(uintptr_t value);
     // "Game.exe+0x1A2B r-x .text" or "[heap] rw-"
     std::string where(uintptr_t address);
+    // Same, with the lists passed in, so many lookups share one /proc read.
+    static std::string where(uintptr_t address, const std::vector<Module>& modules,
+                             const std::vector<Region>& regions);
+    // Closest command name for typos, empty if nothing is close.
+    static std::string suggest(std::string_view word);
     // Consumes -c -d -m <module> -n <max> -p; other flags go to `extra`,
     // which returns false for flags it does not know either.
     using FlagHandler = std::function<bool(const std::string& flag, Args& args)>;

@@ -32,9 +32,16 @@ void add_scan(CLI::App* app, ScanArgs& scan) {
 
 int main(int argc, char** argv) {
     CLI::App app{"patty: read-only memory pattern scanner for processes and binaries.\n"
-                 "Run without a command for the interactive shell."};
+                 "`patty` or `patty <pid|name|file>` starts the interactive shell."};
     app.require_subcommand(0, 1);
     app.set_version_flag("--version", std::string(version_string));
+
+    std::string shell_target;
+    app.add_option("target", shell_target, "Pid, process name or file to open in the shell");
+
+    std::string ps_filter;
+    auto* ps = app.add_subcommand("ps", "List processes, optionally filtered by name");
+    ps->add_option("filter", ps_filter, "Part of the process name");
 
     TargetArgs repl_target;
     auto* repl = app.add_subcommand("repl", "Interactive shell (also the default without a command)");
@@ -133,7 +140,9 @@ int main(int argc, char** argv) {
             return cmd_list(list_target, list_modules, list_output);
         if (dump->parsed())
             return cmd_dump(dump_target, dump_address, dump_size, dump_path);
-        return run_repl(repl_target);
+        if (ps->parsed())
+            return cmd_ps(ps_filter);
+        return run_repl(shell_target.empty() ? repl_target : guess_target(shell_target));
     } catch (const Error& e) {
         std::cerr << "patty: " << e.what() << '\n';
         return 1;

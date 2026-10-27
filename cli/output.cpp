@@ -118,7 +118,8 @@ json modules_json(const std::vector<Module>& modules, size_t pointer_size) {
     return out;
 }
 
-void print_matches(std::ostream& out, const ScanResult& result, size_t pointer_size, const MatchLabel& label) {
+void print_matches(std::ostream& out, const ScanResult& result, size_t pointer_size, const MatchLabel& label,
+                   const MatchLabel& note) {
     for (const auto& match : result) {
         out << "  ";
         if (label)
@@ -128,14 +129,16 @@ void print_matches(std::ostream& out, const ScanResult& result, size_t pointer_s
             out << " -> " << hex(*match.resolved, pointer_size);
         else if (match.resolve_failed)
             out << " -> (unresolved)";
-        if (!match.region.name.empty())
+        if (note)
+            out << "  " << note(match);
+        else if (!match.region.name.empty())
             out << "  " << match.region.name;
         out << '\n';
     }
 }
 
 void print_results(std::ostream& out, std::span<const ScanResult> results, size_t pointer_size,
-                   const MatchLabel& label) {
+                   const MatchLabel& label, const MatchLabel& note) {
     if (results.empty())
         return;
     out << "Scanned " << human_size(results.front().bytes_scanned) << " in " << std::fixed
@@ -146,7 +149,7 @@ void print_results(std::ostream& out, std::span<const ScanResult> results, size_
         if (results.size() > 1 || !result.pattern.empty())
             out << '[' << result.pattern << "] ";
         out << result.size() << (result.size() == 1 ? " match\n" : " matches\n");
-        print_matches(out, result, pointer_size, label);
+        print_matches(out, result, pointer_size, label, note);
     }
 }
 

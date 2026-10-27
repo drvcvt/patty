@@ -79,6 +79,13 @@ std::string_view Session::Args::rest() const {
 
 const std::vector<Session::Command>& Session::commands() {
     static const std::vector<Command> table = {
+        {"open", "o", "open [-raw] <pid|name|file>", "open a process or a file",
+         "A number is a pid, an existing file is opened as a binary, anything else is\n"
+         "a process name. Same as starting the shell with `patty <target>`.\n\n"
+         "  open toygame\n  open 4242\n  open ~/dumps/Game.exe",
+         &Session::cmd_open},
+        {"ps", nullptr, "ps [text]", "list processes",
+         "  ps\n  ps game", &Session::cmd_ps},
         {"proc", nullptr, "proc <pid|name>", "open a running process",
          "Opens a process read-only. Names match case-insensitively; Wine/Proton\n"
          "games are found by their .exe name.\n\n  proc 4242\n  proc Game.exe",
@@ -97,11 +104,12 @@ const std::vector<Session::Command>& Session::commands() {
          "Flags:\n"
          "  -c          executable regions only     -d   writable data only\n"
          "  -m <mod>    only inside a module         -n N stop after N matches\n"
-         "  -o <n>      add n to each match          -r   resolve steps: rip,deref,add:8\n"
+         "  -o <n>      add n to each match          -r   resolve: rip,deref,add:8\n"
+         "  -r <n>      the rel32 operand sits at offset n (same as -o n -r rip)\n"
          "  -s          \"text\" is an MSVC std::string object, not raw characters\n\n"
          "Every match becomes a $N value.\n\n"
          "  find 48 8B 05 ?? ?? ?? ?? 48 85 C0\n"
-         "  find -c -m Game.exe -o 3 -r rip 48 8B 05 ?? ?? ?? ??\n"
+         "  find -c -m Game.exe -r 3 48 8B 05 ?? ?? ?? ??\n"
          "  find \"PlayerController\"",
          &Session::cmd_find},
         {"findval", "fv", "findval [flags] <value> [type]", "search for a number",
@@ -165,7 +173,9 @@ bool Session::execute(std::string_view line) {
         return word == c.name || (c.alias && word == c.alias);
     });
     if (command == table.end()) {
-        m_out << "unknown command \"" << word << "\", try help\n";
+        const auto close = suggest(word);
+        m_out << "unknown command \"" << word << "\""
+              << (close.empty() ? ", try help" : ", did you mean " + close + "?") << '\n';
         return true;
     }
     if (!command->run)
@@ -205,17 +215,63 @@ std::string Session::remember(uintptr_t value) {
 std::string Session::where(uintptr_t address) {
     if (!m_target)
         return {};
+    return where(address, m_target->modules(), m_target->regions());
+}
+
+std::string Session::where(uintptr_t address, const std::vector<Module>& modules,
+                           const std::vector<Region>& regions) {
     std::string text;
-    if (const auto module = m_target->module_at(address))
+    const Module* module = nullptr;
+    for (const auto& m : modules)
+        if (m.contains(address))
+            module = &m;
+    if (module)
         text = module->name + "+" + hex_short(address - module->base);
-    if (const auto region = m_target->region_at(address)) {
+    const Region* region = nullptr;
+    for (const auto& r : regions)
+        if (r.contains(address))
+            region = &r;
+    if (region) {
         text += (text.empty() ? "" : " ") + permissions(*region);
-        if (!region->name.empty() && (!m_target->module_at(address) || region->name != m_target->module_at(address)->name))
+        if (!region->name.empty() && (!module || region->name != module->name))
             text += " " + region->name;
     } else {
         text += text.empty() ? "unmapped" : " unmapped";
     }
     return text;
+}
+
+std::string Session::suggest(std::string_view word) {
+    // Plain edit distance; the command list is short.
+    auto distance = [](std::string_view a, std::string_view b) {
+        std::vector<size_t> row(b.size() + 1);
+        for (size_t j = 0; j <= b.size(); ++j)
+            row[j] = j;
+        for (size_t i = 1; i <= a.size(); ++i) {
+            size_t diagonal = row[0];
+            row[0] = i;
+            for (size_t j = 1; j <= b.size(); ++j) {
+                const size_t above = row[j];
+                row[j] = std::min({row[j] + 1, row[j - 1] + 1, diagonal + (a[i - 1] != b[j - 1])});
+                diagonal = above;
+            }
+        }
+        return row[b.size()];
+    };
+    std::string best;
+    size_t best_distance = 3;
+    for (const auto& command : commands()) {
+        for (const char* name : {command.name, command.alias}) {
+            if (!name)
+                continue;
+            const size_t d = distance(word, name);
+            if (d < best_distance) {
+                best_distance = d;
+                best = command.name;
+            }
+        }
+    }
+    return best;
 }
 
 ScanOptions Session::scan_flags(Args& args, const FlagHandler& extra) {
@@ -243,7 +299,11 @@ ScanOptions Session::scan_flags(Args& args, const FlagHandler& extra) {
 
 void Session::show(const std::vector<ScanResult>& results, const ScanOptions& options) {
     const size_t width = target().pointer_size();
-    print_results(m_out, results, width, [this](const Match& m) { return remember(m.value()); });
+    const auto modules = target().modules();
+    const auto regions = target().regions();
+    print_results(m_out, results, width,
+                  [this](const Match& m) { return remember(m.value()); },
+                  [&](const Match& m) { return where(m.address, modules, regions); });
     for (const auto& result : results)
         if (options.max && result.size() >= options.max)
             m_out << "  (stopped at " << options.max << ", use -n or \"set max\" for more)\n";
@@ -271,6 +331,31 @@ void Session::open(const TargetArgs& args) {
 }
 
 // --- target commands -----------------------------------------------------
+
+void Session::cmd_open(Args& args) {
+    bool raw = false;
+    if (!args.done() && args.tokens[args.next].text == "-raw") {
+        raw = true;
+        args.take();
+    }
+    if (args.done())
+        throw Error("usage: open [-raw] <pid|name|file>");
+    const auto& first = args.tokens[args.next];
+    open(guess_target(first.quoted ? std::string_view(first.text) : args.rest(), raw));
+}
+
+void Session::cmd_ps(Args& args) {
+    const auto filter = std::string(args.rest());
+    size_t shown = 0;
+    for (const auto& process : Process::list()) {
+        if (!filter.empty() && !contains_ci(process.name, filter))
+            continue;
+        m_out << std::right << std::setw(8) << process.pid << "  " << process.name << '\n';
+        ++shown;
+    }
+    if (shown == 0)
+        m_out << "no process matches \"" << filter << "\"\n";
+}
 
 void Session::cmd_proc(Args& args) {
     const std::string which = args.take().text;
@@ -342,8 +427,16 @@ void Session::cmd_find(Args& args) {
     auto options = scan_flags(args, [&](const std::string& flag, Args& a) {
         if (flag == "-o")
             offset = static_cast<int64_t>(require_number(a.take().text));
-        else if (flag == "-r")
-            resolve = a.take().text;
+        else if (flag == "-r") {
+            // "-r 3" is short for "-o 3 -r rip": the rel32 operand sits at offset 3.
+            const std::string spec = a.take().text;
+            if (const auto at = parse_number(spec)) {
+                offset += static_cast<int64_t>(*at);
+                resolve = resolve.empty() ? "rip" : resolve + ",rip";
+            } else {
+                resolve = resolve.empty() ? spec : resolve + "," + spec;
+            }
+        }
         else if (flag == "-s")
             msvc = true;
         else
