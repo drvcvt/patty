@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(patty VERSION 0.2.0 LANGUAGES CXX)
+project(patty VERSION 0.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -223,6 +223,7 @@ if(PATTY_BUILD_TESTS)
         tests/test_image.cpp
         tests/test_check.cpp
         tests/test_kernel.cpp
+        tests/test_types.cpp
     )
     # test_kernel.cpp checks the private search kernels directly.
     target_include_directories(patty_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
@@ -235,6 +236,18 @@ if(PATTY_BUILD_TESTS)
 
     include(GoogleTest)
     gtest_discover_tests(patty_tests)
+
+    # The _sig literal must reject malformed signatures at compile time.
+    if(NOT MSVC)
+        set(PATTY_SIG_PROBE ${CMAKE_CXX_COMPILER} -std=c++20 -fsyntax-only
+            -I${CMAKE_CURRENT_SOURCE_DIR}/include -I${PATTY_GENERATED_INCLUDE_DIR}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/compile_fail/sig_literal.cpp)
+        add_test(NAME patty_sig_literal_compiles COMMAND ${PATTY_SIG_PROBE})
+        add_test(NAME patty_bad_sig_literal_fails_to_compile COMMAND ${PATTY_SIG_PROBE} -DPATTY_BAD_SIG)
+        add_test(NAME patty_foreign_member_fails_to_compile COMMAND ${PATTY_SIG_PROBE} -DPATTY_WRONG_MEMBER)
+        set_tests_properties(patty_bad_sig_literal_fails_to_compile patty_foreign_member_fails_to_compile
+                             PROPERTIES WILL_FAIL TRUE)
+    endif()
 
     if(PATTY_BUILD_CLI)
         set(PATTY_SMOKE_FIXTURE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/patty-smoke.bin")

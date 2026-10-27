@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cstddef>
 #include <functional>
+#include <initializer_list>
 #include <span>
 #include <string>
 #include <vector>
@@ -42,14 +43,24 @@ public:
     // Several patterns in one pass over memory. One result per pattern, same order.
     std::vector<ScanResult> find(std::span<const Pattern> patterns,
                                  const ScanOptions& options = {}) const;
+    std::vector<ScanResult> find(std::initializer_list<Pattern> patterns,
+                                 const ScanOptions& options = {}) const {
+        return find(std::span<const Pattern>(patterns.begin(), patterns.size()), options);
+    }
+
+    // The exact bytes of a value: find_value(87.5f), find_value(uint32_t{1337}).
+    template <Readable T>
+    ScanResult find_value(const T& value, const ScanOptions& options = {}) const {
+        return find(Pattern::value(value), options);
+    }
 
     // Places that hold `address` as a pointer of the target's width.
-    ScanResult find_pointer(uintptr_t address, const ScanOptions& options = {}) const;
-    std::vector<ScanResult> find_pointers(std::span<const uintptr_t> addresses,
+    ScanResult find_pointer(Address address, const ScanOptions& options = {}) const;
+    std::vector<ScanResult> find_pointers(std::span<const Address> addresses,
                                           const ScanOptions& options = {}) const;
 
     // Classifies each pointer-sized field of the object at `address`.
-    Probe probe(uintptr_t address, size_t size = 0x400) const;
+    Probe probe(Address address, size_t size = 0x400) const;
 
     // Scans every pattern of the profile and tells which still match uniquely.
     // Uses options.module for RVAs; options.max defaults to 100 here.

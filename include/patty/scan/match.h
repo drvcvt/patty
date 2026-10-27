@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../types.h"
+
 #include "../memory/region.h"
 
 #include <cstdint>
@@ -11,14 +13,19 @@
 namespace patty {
 
 struct Match {
-    uintptr_t address = 0;              // where the pattern starts
-    std::optional<uintptr_t> resolved;  // after the pattern's resolve steps, if it has any
-    bool resolve_failed = false;        // the pattern has steps, but a read on the way failed
-    std::string pattern;                // name of the pattern that matched
-    Region region;                      // region the match lies in
+    Address address = 0;              // where the pattern starts
+    std::optional<Address> resolved;  // after the pattern's resolve steps, if it has any
+    bool resolve_failed = false;      // the pattern has steps, but a read on the way failed
+    std::string pattern;              // name of the pattern that matched
+    Region region;                    // region the match lies in
 
     // What the match points at: the resolved address, or the match itself.
-    uintptr_t value() const { return resolved.value_or(address); }
+    Address value() const { return resolved.value_or(address); }
+
+    // value() as a typed pointer: match.as<Remote<Player>>() for a global
+    // that holds the player pointer.
+    template <typename T, typename Word = std::uint64_t>
+    Remote<T, Word> as() const { return Remote<T, Word>(value()); }
 };
 
 // Matches of one pattern, sorted by address. Iterable like a vector.
@@ -50,7 +57,7 @@ struct ProbeField {
 
 // Pointer-sized fields of an object, each classified by what it looks like.
 struct Probe {
-    uintptr_t address = 0;
+    Address address = 0;
     size_t size = 0;  // bytes actually read, clipped to the containing region
     std::vector<ProbeField> fields;
 };

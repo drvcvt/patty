@@ -98,6 +98,23 @@ std::vector<uint32_t> Process::find(std::string_view name) {
     return result;
 }
 
+std::vector<ProcessInfo> Process::list() {
+    std::vector<ProcessInfo> result;
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE)
+        return result;
+    PROCESSENTRY32 entry{};
+    entry.dwSize = sizeof(entry);
+    if (Process32First(snapshot, &entry)) {
+        do {
+            result.push_back({entry.th32ProcessID, entry.szExeFile});
+        } while (Process32Next(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+    std::sort(result.begin(), result.end(), [](const ProcessInfo& a, const ProcessInfo& b) { return a.pid < b.pid; });
+    return result;
+}
+
 bool Process::read(uintptr_t address, void* buffer, size_t size) {
     SIZE_T done = 0;
     return size == 0 ||

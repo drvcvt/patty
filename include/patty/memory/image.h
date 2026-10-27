@@ -24,21 +24,21 @@ public:
     // `base` is given; anything else becomes one flat region (see open_raw).
     // Throws patty::Error if the file cannot be read or its headers are broken.
     static Image open(const std::filesystem::path& path,
-                      std::optional<uintptr_t> base = std::nullopt);
+                      std::optional<Address> base = std::nullopt);
 
     // Loads a file as one flat region at `base`, ignoring any headers.
     // Use this for memory dumps or when header parsing gets in the way.
-    static Image open_raw(const std::filesystem::path& path, uintptr_t base = 0);
+    static Image open_raw(const std::filesystem::path& path, Address base = 0);
 
     // Wraps bytes as one flat region at `base`.
-    static Image from_bytes(std::vector<uint8_t> bytes, uintptr_t base = 0,
+    static Image from_bytes(std::vector<uint8_t> bytes, Address base = 0,
                             std::string name = "buffer");
 
     using Target::read;
-    bool read(uintptr_t address, void* buffer, size_t size) override;
+    bool read(Address address, void* buffer, size_t size) override;
     // Zero-copy: points into the mapped file when the range is backed by
     // file bytes (not by zero-filled .bss or alignment gaps).
-    std::span<const uint8_t> view(uintptr_t address, size_t size) override;
+    std::span<const uint8_t> view(Address address, size_t size) override;
     std::vector<Region> regions() override { return m_regions; }
     // The whole image as one module named after the file.
     std::vector<Module> modules() override;
@@ -46,7 +46,7 @@ public:
     std::string describe() const override;
 
     Format format() const { return m_format; }
-    uintptr_t base() const { return m_base; }
+    Address base() const { return m_base; }
     size_t size() const { return m_size; }
     const std::string& name() const { return m_name; }
 
@@ -66,7 +66,7 @@ private:
     std::shared_ptr<const void> m_storage;  // the file mapping or owned bytes
     std::span<const uint8_t> m_file;
     std::vector<Segment> m_segments;        // sorted by offset, non-overlapping
-    uintptr_t m_base = 0;
+    Address m_base = 0;
     size_t m_size = 0;
     std::vector<Region> m_regions;
     std::string m_name;

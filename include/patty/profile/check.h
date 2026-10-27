@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../types.h"
+
 #include "../memory/region.h"
 #include "../scan/match.h"
 
@@ -23,8 +25,8 @@ struct PatternCheck {
     std::string name;
     CheckStatus status = CheckStatus::Missing;
     std::vector<Match> matches;
-    uintptr_t value = 0;           // when Ok
-    std::optional<uintptr_t> rva;  // value - module base, when Ok and a module was given
+    Address value = 0;           // when Ok
+    std::optional<Address> rva;  // value - module base, when Ok and a module was given
 };
 
 struct CheckReport {

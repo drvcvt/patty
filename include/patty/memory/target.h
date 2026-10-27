@@ -1,13 +1,14 @@
 #pragma once
 
 #include "region.h"
+#include "../types.h"
 
 #include <cstdint>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
-#include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace patty {
@@ -21,7 +22,7 @@ public:
 
     // Copies exactly `size` bytes starting at `address` into `buffer`.
     // Returns false if any of those bytes cannot be read.
-    virtual bool read(uintptr_t address, void* buffer, size_t size) = 0;
+    virtual bool read(Address address, void* buffer, size_t size) = 0;
 
     // Readable regions, sorted by base address. Live processes re-query this
     // on every call, so it reflects the current mappings.
@@ -40,32 +41,75 @@ public:
     // Direct access to `size` bytes at `address` without copying, valid as
     // long as the target lives. Empty when the target cannot offer that
     // (live processes) or the range is not contiguous in memory; use read().
-    virtual std::span<const uint8_t> view(uintptr_t /*address*/, size_t /*size*/) { return {}; }
+    virtual std::span<const uint8_t> view(Address /*address*/, size_t /*size*/) { return {}; }
 
-    template <typename T>
-    std::optional<T> read(uintptr_t address) {
-        static_assert(std::is_trivially_copyable_v<T>, "read<T> needs a trivially copyable T");
+    // A whole value: read<float>(address), read<Player>(address).
+    template <Readable T>
+    std::optional<T> read(Address address) {
         T value{};
         if (!read(address, &value, sizeof(T)))
             return std::nullopt;
         return value;
     }
 
+    // Whatever a Remote points to: read(player.target) is an optional<Player>.
+    template <Readable T, typename Word>
+    std::optional<T> read(Remote<T, Word> pointer) {
+        return read<T>(pointer.address());
+    }
+
+    // Follows members through Remote<> pointers and reads the last one:
+    // read(player, &Player::target, &Player::health) is player->target->health.
+    // Empty if any read fails or a pointer on the way is null.
+    template <typename T, typename Word, typename M, typename... Rest>
+    auto read(Remote<T, Word> object, M T::* member, Rest... rest) {
+        const auto field = object[member];
+        if constexpr (sizeof...(Rest) == 0) {
+            return read(field);
+        } else {
+            static_assert(is_remote_v<M>, "only Remote<> members can be followed further");
+            using Result = decltype(read(std::declval<M>(), rest...));
+            const auto next = read(field);
+            if (!next || !*next)
+                return Result{};
+            return read(*next, rest...);
+        }
+    }
+
+    // `count` consecutive values, or nothing if they are not all readable.
+    template <Readable T>
+    std::vector<T> read_array(Address address, size_t count) {
+        std::vector<T> values(count);
+        if (count > 0 && !read(address, values.data(), count * sizeof(T)))
+            return {};
+        return values;
+    }
+
+    template <Readable T, typename Word>
+    std::vector<T> read_array(Remote<T, Word> first, size_t count) {
+        return read_array<T>(first.address(), count);
+    }
+
     // Reads a pointer of the target's width.
-    std::optional<uintptr_t> read_pointer(uintptr_t address);
+    std::optional<Address> read_pointer(Address address);
 
     // Returns the bytes, or an empty vector if the range is not fully readable.
-    std::vector<uint8_t> read_bytes(uintptr_t address, size_t size);
+    std::vector<uint8_t> read_bytes(Address address, size_t size);
 
     // Reads up to the first NUL or `max_length` bytes, stopping early at the
     // end of readable memory. nullopt if not even the first byte is readable.
-    std::optional<std::string> read_string(uintptr_t address, size_t max_length = 256);
+    std::optional<std::string> read_string(Address address, size_t max_length = 256);
 
-    std::optional<Region> region_at(uintptr_t address);
+    template <typename Word>
+    std::optional<std::string> read_string(Remote<char, Word> text, size_t max_length = 256) {
+        return read_string(text.address(), max_length);
+    }
+
+    std::optional<Region> region_at(Address address);
 
     // Case-insensitive lookup by name.
     std::optional<Module> module(std::string_view name);
-    std::optional<Module> module_at(uintptr_t address);
+    std::optional<Module> module_at(Address address);
 
 protected:
     Target() = default;

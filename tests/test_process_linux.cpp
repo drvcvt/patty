@@ -112,3 +112,13 @@ TEST(LinuxProcess, FindsItselfByName) {
     const auto pids = Process::find("PATTY_TESTS");
     EXPECT_NE(std::find(pids.begin(), pids.end(), static_cast<uint32_t>(getpid())), pids.end());
 }
+
+TEST(LinuxProcess, ListsItself) {
+    const auto all = Process::list();
+    const auto self = std::find_if(all.begin(), all.end(),
+                                   [](const ProcessInfo& p) { return p.pid == static_cast<uint32_t>(getpid()); });
+    ASSERT_NE(self, all.end());
+    EXPECT_EQ(self->name, "patty_tests");
+    EXPECT_TRUE(std::is_sorted(all.begin(), all.end(),
+                               [](const ProcessInfo& a, const ProcessInfo& b) { return a.pid < b.pid; }));
+}

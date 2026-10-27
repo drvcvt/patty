@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../types.h"
+
 #include <cstdint>
 #include <cstring>
 #include <span>
@@ -49,10 +51,9 @@ public:
     // A little-endian integer of `size` bytes (1..8).
     static Pattern integer(uint64_t value, size_t size = 8);
 
-    // The exact in-memory bytes of any trivially copyable value.
-    template <typename T>
+    // The exact in-memory bytes of a value: value(87.5f), value(uint32_t{1337}).
+    template <Readable T>
     static Pattern value(const T& v) {
-        static_assert(std::is_trivially_copyable_v<T>, "Pattern::value needs a trivially copyable T");
         uint8_t bytes[sizeof(T)];
         std::memcpy(bytes, &v, sizeof(T));
         return raw(bytes);
@@ -92,5 +93,61 @@ private:
     std::vector<uint8_t> m_mask;
     std::vector<ResolveStep> m_steps;
 };
+
+namespace detail {
+
+// A string literal usable as a template argument, for the _sig literal.
+template <std::size_t N>
+struct FixedString {
+    char text[N]{};
+    consteval FixedString(const char (&literal)[N]) {
+        for (std::size_t i = 0; i < N; ++i)
+            text[i] = literal[i];
+    }
+    constexpr std::string_view view() const { return {text, N - 1}; }
+};
+
+// The rules of Pattern::aob, at compile time.
+constexpr bool valid_aob(std::string_view text) {
+    auto hex = [](char c) {
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+    };
+    bool fixed = false;
+    std::size_t i = 0;
+    while (i < text.size()) {
+        if (text[i] == ' ' || text[i] == '\t') {
+            ++i;
+            continue;
+        }
+        std::size_t end = i;
+        while (end < text.size() && text[end] != ' ' && text[end] != '\t')
+            ++end;
+        const auto token = text.substr(i, end - i);
+        if (token.size() == 2 && hex(token[0]) && hex(token[1]))
+            fixed = true;
+        else if (token != "?" && token != "??" && token != "*" && token != "**")
+            return false;
+        i = end;
+    }
+    return fixed;
+}
+
+} // namespace detail
+
+namespace literals {
+
+// A signature checked while compiling: a typo is a compile error, not a
+// runtime exception.
+//
+//   using namespace patty::literals;
+//   auto local = "48 8B 05 ?? ?? ?? ?? 48 85 C0"_sig.rip(3);
+template <detail::FixedString S>
+Pattern operator""_sig() {
+    static_assert(detail::valid_aob(S.view()),
+                  "malformed signature: hex byte pairs and ?? wildcards, at least one fixed byte");
+    return Pattern::aob(S.view());
+}
+
+} // namespace literals
 
 } // namespace patty

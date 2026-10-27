@@ -9,6 +9,11 @@
 
 namespace patty {
 
+struct ProcessInfo {
+    uint32_t pid = 0;
+    std::string name;  // Wine/Proton processes show their Windows exe name
+};
+
 // A running process, opened read-only. Supported on Linux and Windows.
 //
 // Linux reads memory with process_vm_readv and nothing else: no ptrace, no
@@ -37,8 +42,11 @@ public:
     // processes are found by their Windows name ("Game.exe").
     static std::vector<uint32_t> find(std::string_view name);
 
+    // Every process this user can see, sorted by pid.
+    static std::vector<ProcessInfo> list();
+
     using Target::read;
-    bool read(uintptr_t address, void* buffer, size_t size) override;
+    bool read(Address address, void* buffer, size_t size) override;
     std::vector<Region> regions() override;
     size_t pointer_size() const override { return m_pointer_size; }
     std::string describe() const override;

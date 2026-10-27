@@ -170,6 +170,27 @@ std::vector<uint32_t> Process::find(std::string_view name) {
     return result;
 }
 
+std::vector<ProcessInfo> Process::list() {
+    std::vector<ProcessInfo> result;
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator("/proc", ec)) {
+        const auto dir = entry.path().filename().string();
+        if (dir.empty() || !std::all_of(dir.begin(), dir.end(), [](unsigned char c) { return std::isdigit(c); }))
+            continue;
+        const auto pid = static_cast<uint32_t>(std::stoul(dir));
+        auto name = first_line(proc_path(pid, "comm"));
+        if (name.empty())
+            continue;
+        // Wine shows up as "wine64-preloader" or similar; argv[0] has the exe.
+        const auto argv0 = base_name(first_line(proc_path(pid, "cmdline"), '\0'));
+        if (detail::lower(argv0).ends_with(".exe"))
+            name = argv0;
+        result.push_back({pid, std::move(name)});
+    }
+    std::sort(result.begin(), result.end(), [](const ProcessInfo& a, const ProcessInfo& b) { return a.pid < b.pid; });
+    return result;
+}
+
 bool Process::read(uintptr_t address, void* buffer, size_t size) {
     return size == 0 || readv(m_pid, address, buffer, size);
 }
