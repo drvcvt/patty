@@ -1,9 +1,8 @@
 # patty MCP server (optional)
 
-A small [FastMCP](https://gofastmcp.com) server that lets Claude Code or any
-other MCP client drive patty. You don't need it to use patty. It's a thin
-wrapper that calls the `patty` binary and passes its JSON output through, so
-everything it can do, the CLI can do too.
+[FastMCP](https://gofastmcp.com) server so Claude Code or other MCP clients can
+use patty. Not needed for anything else. It just calls the `patty` binary and
+passes the JSON through.
 
 ## Setup
 
@@ -11,14 +10,14 @@ everything it can do, the CLI can do too.
 scripts/setup.sh --mcp
 ```
 
-That creates `mcp/.venv` with `fastmcp` on top of the normal setup. By hand:
+Creates `mcp/.venv` with fastmcp. Or by hand:
 
 ```bash
 python3 -m venv mcp/.venv
 mcp/.venv/bin/pip install fastmcp
 ```
 
-Then tell your client about it, e.g. in `.mcp.json`:
+Client config, e.g. `.mcp.json`:
 
 ```json
 {
@@ -32,9 +31,8 @@ Then tell your client about it, e.g. in `.mcp.json`:
 }
 ```
 
-Point `PATTY_EXE` at the installed binary. That's the one `setup.sh` gave the
-capability to read other processes, and unlike `build/patty` it keeps it across
-rebuilds.
+Use the installed binary for `PATTY_EXE`, it has the capability and keeps it
+across rebuilds (`build/patty` doesn't).
 
 ## Tools
 
@@ -43,11 +41,9 @@ rebuilds.
 `scan_pointer`, `scan_pointers`, `find_string_references`, `probe_object`,
 `list_regions`, `dump_memory`.
 
-`check_profile` is the one worth knowing about: give it a profile and a target,
-and it tells the model which signatures survived a game update and where they
-point now.
+`check_profile` runs a profile against a target, same as `patty check`.
 
 ## Tests
 
-`tests/mcp_smoke.py` runs as part of `ctest` whenever `mcp/.venv` exists and has
-fastmcp in it. Without the venv the test is skipped and nothing else changes.
+`tests/mcp_smoke.py` runs in `ctest` if `mcp/.venv` with fastmcp exists,
+otherwise it's skipped.

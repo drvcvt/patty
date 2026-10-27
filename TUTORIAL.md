@@ -1,18 +1,16 @@
-# Your first ten minutes with patty
+# Tutorial
 
-No game needed. `examples/toygame.c` is a forty line program with a player
-struct behind a global pointer, which is exactly the situation you're in with
-most real games, just without the anti-cheat and the 40 GB download.
+Uses `examples/toygame.c`, a small program with a player struct behind a
+global pointer. Steps: find the health value, find the global that points to
+it, make a sig for the code that reads the global, then rebuild the toy as
+"version 1.1" and see what `check` says.
 
-We'll find the player's health, figure out which global points to it, turn the
-code that reads that global into a signature, and then ship a "game update"
-that breaks half of our work, so you can see how patty tells you what to fix.
-
-Everything below is real output. Your addresses will differ, the offsets won't.
+All output below is from real runs. Addresses will be different for you,
+offsets won't.
 
 ## 0. Build the toy
 
-You need patty built (`scripts/setup.sh`, or the steps in the README) and gcc.
+Needs patty (see README) and gcc.
 
 ```console
 $ gcc -O1 -o toygame examples/toygame.c
@@ -20,13 +18,12 @@ $ ./toygame &
 toygame 1.0, pid 2029764
 ```
 
-toygame lets any of your processes read it, so this works without the sudo
-step. A real game needs `setup.sh` to have done its thing.
+toygame allows other processes to read it, so no sudo/setcap needed here. For
+a real game you need `setup.sh` first.
 
-## 1. Find the value you can see
+## 1. Find the value
 
-The player has 87.5 health. In a real game you'd read that off the HUD. Start
-the shell, open the process and look for the number:
+Player has 87.5 health:
 
 ```text
 patty> proc toygame
@@ -40,11 +37,10 @@ Scanned 2.4 MB in 0.5 ms
   $3    0x00007FFE8E241C3C  [stack]
 ```
 
-`87.5` has a decimal point, so patty searched for a float. Three hits: one is
-the constant inside the binary, one sits on the stack, and the one on the heap
-is the live player. Every match got a number, `$2` is the one we want.
+Has a decimal point, so it's searched as float. Hit 1 is the constant in the
+binary, 3 is on the stack, 2 on the heap is the actual player.
 
-## 2. Look around it
+## 2. Look at the object
 
 ```text
 patty toygame:2029764> probe -s 0x18 $2
@@ -55,14 +51,12 @@ Probed 24 B at 0x000055BB1243E030
   +10    0x000055BB1243E010  pointer     -> 0x55BB1243E010
 ```
 
-`probe` guesses what each 8-byte field is. Health at `+0` (with the level, 12,
-in the upper half of the same 8 bytes), a pointer to the name at `+8`, and a
-pointer to something else at `+10`. Hold that thought.
+Health at `+0` (the upper half of that qword is the level, 12), name pointer
+at `+8`, some other pointer at `+10`.
 
-## 3. Who points at the player?
+## 3. Find what points to it
 
-Heap addresses change on every start, so we need something stable that leads
-there. Ask which memory holds a pointer to `$2`:
+Heap addresses change every run, so look for a pointer to `$2`:
 
 ```text
 patty toygame:2029764> refs $2
@@ -74,15 +68,13 @@ patty toygame:2029764> p $4
 $5 = 0x000055BAD5B48020  toygame+0x4020 rw-
 ```
 
-A pointer inside the binary's own writable data, at `toygame+0x4020`. That's a
-global, and globals stay where they are relative to the module. In a real game
-this is the moment you write `0x4020` down.
+It's in the binary's data at `toygame+0x4020`, so it's a global. That offset is
+stable until the next update.
 
-## 4. Turn it into a signature
+## 4. Make a sig
 
-`0x4020` is good until the next update moves it. What survives updates much
-better is the *code* that reads the global. You'd normally go to IDA for this;
-objdump does the job for toygame:
+To survive updates, sig the code that reads the global instead of hardcoding
+`0x4020`. Normally you'd do this in IDA, objdump is enough here:
 
 ```console
 $ objdump -d --disassemble=tick toygame
@@ -96,17 +88,15 @@ $ objdump -d --disassemble=tick toygame
     1201:	c3                   	ret
 ```
 
-Take the `mov` and the two instructions after it, and replace the four bytes
-of the displacement with wildcards, because those are exactly what changes when
-the global moves:
+Take the `mov` plus the next two instructions and wildcard the 4 displacement
+bytes, since those change when the global moves:
 
 ```
 48 8B 05 ?? ?? ?? ?? 66 0F EF C0 48 85 C0
 ```
 
-Now check that it finds one place, and that following it lands on the global
-from step 3. `-c` searches code only, `-m toygame` stays inside the binary,
-`-o 3 -r rip` skips the three opcode bytes and resolves the rip-relative operand:
+Test it. `-c` = code only, `-m toygame` = only this module, `-o 3 -r rip` =
+skip the 3 opcode bytes and resolve the rip-relative operand:
 
 ```text
 patty toygame:2029764> find -c -m toygame -o 3 -r rip 48 8B 05 ?? ?? ?? ?? 66 0F EF C0 48 85 C0
@@ -116,12 +106,11 @@ Scanned 4 KB in 0.2 ms
   $6    0x000055BAD5B451ED -> 0x000055BAD5B48020  toygame
 ```
 
-One match, and `-> ...8020` is `$4`. That signature is the thing to keep.
+Unique, and it resolves to `$4` from step 3.
 
-## 5. Walk the pointers
+## 5. Follow pointers
 
-With `[...]` reading a pointer, you can go from the signature all the way to
-the data:
+`[...]` reads a pointer:
 
 ```text
 patty toygame:2029764> x/s [[$6]+8]
@@ -132,13 +121,12 @@ patty toygame:2029764> x/fw $
 0x000055BB1243E010  40
 ```
 
-`[$6]` is the player, `+8` its name. The mystery pointer at `+0x10` leads to
-another player with 40 health, the enemy it's targeting.
+`[$6]` is the player, `+8` the name, `+0x10` points to another player with 40
+health (the target).
 
-## 6. Keep it in a profile
+## 6. Profile
 
-Signatures you want to keep go into a profile. `examples/toygame.json` has the
-one from step 4 plus three more, to make the next part interesting:
+`examples/toygame.json` has the sig from step 4 plus three others:
 
 ```json
 {
@@ -155,9 +143,8 @@ one from step 4 plus three more, to make the next part interesting:
 }
 ```
 
-`HealthRead` covers the `movss (%rax)` that reads health, so it bakes in the
-assumption that health sits at `+0`. `Prologue` is a bad signature on purpose:
-every function starts with those four bytes.
+`HealthRead` includes the `movss (%rax)`, so it depends on health being at
+`+0`. `Prologue` is a bad sig on purpose, every function starts with it.
 
 ```console
 $ patty check --name toygame --profile examples/toygame.json
@@ -169,10 +156,9 @@ Checked 4 pattern(s) over 20 KB in 0.3 ms: 3 ok, 1 ambiguous, 0 missing
   ambiguous   Prologue     20 matches
 ```
 
-## 7. The update
+## 7. Update
 
-Version 1.1 adds a `team` field at the front of the player and a new global.
-That's a perfectly normal patch, and it moves things around:
+1.1 adds a `team` field at the start of the struct and a new global:
 
 ```console
 $ kill %1
@@ -188,12 +174,9 @@ Checked 4 pattern(s) over 20 KB in 1.3 ms: 2 ok, 1 ambiguous, 1 missing
   ambiguous   Prologue     21 matches
 ```
 
-Read it top to bottom:
-
-`LocalPlayer` still matches, and the global moved from `0x4020` to `0x4028`.
-That's your new offset, no reversing needed. `Tick` moved too and is still
-fine. `HealthRead` is gone, and that's the useful part: the code that reads
-health changed, which means the struct changed. Time to look:
+`LocalPlayer` still works and gives you the new offset, `0x4028`. `Tick`
+moved but still matches. `HealthRead` broke, which tells you the struct
+changed. Check it:
 
 ```text
 patty toygame:2030539> find -c -m toygame -o 3 -r rip 48 8B 05 ?? ?? ?? ?? 66 0F EF C0 48 85 C0
@@ -207,22 +190,14 @@ patty toygame:2030539> x/fw [$1]+4
 0x00005557DB2B3044  87.5
 ```
 
-A new `1` in front (the team), then 1118765056, which is 87.5 read as an
-integer: health is at `+4` now. Fix `HealthRead` to
-`48 85 C0 74 05 F3 0F 10 40 04`, maybe throw `Prologue` away, and the profile
-is ready for 1.1.
+`1` is the new team field, `1118765056` is 87.5 as an int. Health is at `+4`
+now. New `HealthRead`: `48 85 C0 74 05 F3 0F 10 40 04`. Drop `Prologue`.
 
-That loop is most of what patty is for: find it once, write it down as a
-signature, and after every update let `check` tell you what moved and what
-broke.
+## Next
 
-## Where to go from here
-
-- A real game: run `scripts/setup.sh` once, then `patty repl --name Game.exe`.
-  Proton and Wine games are found by their Windows exe name, and their modules
-  usually show up under their file names (`Game.exe`, `UnityPlayer.dll`), so
-  `-m Game.exe` works. `modules` in the shell shows what's there.
-- Put `patty check` in a script that runs after every patch. It exits with `2`
-  as soon as anything isn't `ok`.
-- The same steps from C++ are in the README under "Using patty as a library".
-- `help` in the shell, and `help <command>` for the details of each one.
+- Real game: `scripts/setup.sh`, then `patty repl --name Game.exe`. Proton/Wine
+  games are found by their exe name, `modules` lists what's loaded.
+- `patty check` exits with 2 if anything isn't `ok`, so you can run it from a
+  script after every patch.
+- C++ version of the same steps: README, "Library".
+- `help` / `help <command>` in the shell.

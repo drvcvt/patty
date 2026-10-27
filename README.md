@@ -1,11 +1,10 @@
 # patty
 
-patty finds byte signatures in running processes and in binaries on disk,
-follows them to the data you actually care about, and after every game update
-tells you which of your signatures survived and where things moved.
+Sig scanner for live processes and PE/ELF files, Linux and Windows. CLI, a
+gdb-ish shell and a C++20 library.
 
-It's a command line tool, a small interactive shell that borrows a lot from
-gdb, and the C++20 library both of them are built on. It only ever reads.
+Read-only. On Linux it only uses `process_vm_readv`: no ptrace attach, nothing
+gets stopped, no `/proc/<pid>/mem`.
 
 ```text
 patty toygame:2029764> find -c -m toygame -o 3 -r rip 48 8B 05 ?? ?? ?? ?? 66 0F EF C0 48 85 C0
@@ -21,98 +20,74 @@ patty toygame:2029764> x/fw $
 0x000055BB1243E010  40
 ```
 
-Works on Linux and Windows. On Linux patty reads memory through
-`process_vm_readv` and that's it: no ptrace attach, no stopped threads, no
-`/proc/<pid>/mem`.
-
-**New here?** [TUTORIAL.md](TUTORIAL.md) walks you through a full round on a
-tiny toy game in about ten minutes: find a value, trace it back to a global,
-turn that into a signature, then survive an update.
-
-## Getting it running
+## Install
 
 ```bash
-git clone https://github.com/drvcvt/patty.git
-cd patty
+git clone https://github.com/drvcvt/patty.git && cd patty
 scripts/setup.sh
 ```
 
-The script asks for your sudo password right at the start and never again.
-Then it builds, runs the tests, installs to `~/.local` and gives the binary
-permission to read other processes. Want it somewhere else? `--prefix DIR`.
-No sudo at all? `--no-setcap`. patty can then still read files, and processes
-that explicitly allow it, like the toy game from the tutorial.
+Builds, runs the tests, installs to `~/.local` and setcaps the binary. Asks for
+sudo once at the start, then runs through.
 
-You need CMake 3.20+, Ninja and a C++20 compiler. The libraries (nlohmann/json,
-CLI11, GoogleTest, isocline) get fetched if your system doesn't have them.
+Flags: `--prefix DIR`, `--no-setcap` (no sudo at all), `--mcp` (optional MCP
+server, see [mcp/README.md](mcp/README.md)), `--jobs N`.
 
-### About that sudo
+Needs CMake 3.20+, Ninja and a C++20 compiler. nlohmann/json, CLI11,
+GoogleTest and isocline get fetched if you don't have them.
 
-Most distros set `kernel.yama.ptrace_scope` to 1, which means a process may
-only read memory of its own children. patty never calls ptrace, but the kernel
-checks the same permission for `process_vm_readv`. So `setup.sh` runs
-`sudo setcap cap_sys_ptrace=ep` on the patty binary, which lifts that limit for
-patty alone instead of for your whole system.
+**Why sudo:** with `kernel.yama.ptrace_scope=1` (default on most distros) the
+kernel blocks `process_vm_readv` on anything that isn't your own child process,
+even though it's not ptrace. `cap_sys_ptrace` on the binary fixes that for
+patty only. With that cap patty can read root's processes too, so the script
+also does `chmod 700` on it. A rebuild drops the cap, rerun the script after.
 
-That also means patty can read anyone's processes, root's included, so the
-script makes the binary `chmod 700`: only you can run it. And since a rebuild
-replaces the file, the capability goes away with it. Run the script again after
-rebuilding.
+If the cap is missing you get an error that says so, not empty results.
 
-Without the capability you don't get mysteriously empty results, you get this:
+## Tutorial
 
-```text
-patty: not allowed to read pid 979010 (kernel.yama.ptrace_scope=1). patty only uses
-process_vm_readv, but the kernel gates it like ptrace. Run scripts/setup.sh once, or:
-sudo setcap cap_sys_ptrace=ep $(command -v patty)
+[TUTORIAL.md](TUTORIAL.md): find a value in a toy program, trace it back to a
+global, make a sig out of it, then break it with an "update". About 10 minutes,
+no game or sudo needed.
+
+## Shell
+
+```bash
+patty                        # then: proc Game.exe / file Game.exe
+patty repl --name Game.exe   # or --pid / --file
 ```
 
-Windows doesn't have any of this; patty just opens the process for reading.
-
-## The shell
-
-`patty` on its own starts it. `patty repl --name Game.exe` (or `--pid`,
-`--file`) opens a target right away.
-
-The idea is the same as in gdb: everything you find gets a number (`$1`, `$2`,
-...), `$` is the last one, and you can do math on them and follow pointers with
-brackets. `[[$6]+8]` reads the pointer at `$6`, adds 8 and reads again. Module
-names work as addresses too (`Game.exe+0x2A4F10`; quote names with a dash in
-them, like `'ld-linux-x86-64.so.2'`). Numbers are decimal unless they start with
-`0x`, also like gdb.
+Results get numbered like in gdb: `$1`, `$2`, `$` is the last one.
+Expressions work anywhere an address goes: `Game.exe+0x2A4F10`, `[$1]+0x18`
+(brackets read a pointer), `0x` for hex, quotes around module names with a
+dash (`'ld-linux-x86-64.so.2'`).
 
 <details>
-<summary>All the commands</summary>
+<summary>commands</summary>
 
-| Command | What it does |
+| | |
 |---|---|
-| `proc <pid\|name>` | open a running process |
+| `proc <pid\|name>` | open a process |
 | `file [-raw] <path>` | open a PE, ELF or raw dump |
 | `info`, `maps [text]`, `modules [text]` | what's loaded where |
-| `find [flags] <aob \| "text">` | search for a signature or a string |
-| `findval <value> [type]` | search for a number: `i8`..`u64`, `float`, `double` |
-| `refs <expr>` | find pointers to an address |
-| `x[/NFU] <expr>` | look at memory, gdb style (formats `x d u f a s c`, sizes `b h w g`) |
-| `p <expr>` | evaluate an address and say where it points |
-| `probe [-s size] <expr>` | guess what each field of an object is |
-| `load <profile>`, `check` | run a signature profile against the target |
-| `dump <file> <size> <expr>` | save memory to a file |
-| `set max N`, `set parallel on` | scan defaults |
+| `find [-c] [-d] [-m mod] [-n max] [-o n] [-r rip,deref,add:8] <aob \| "text">` | sig or string search |
+| `findval <value> [i8..u64\|float\|double]` | number search |
+| `refs <expr>` | pointers to an address |
+| `x[/NFU] <expr>` | examine memory like gdb (`x d u f a s c`, `b h w g`) |
+| `p <expr>` | evaluate, show where it points |
+| `probe [-s size] <expr>` | guess field types of an object |
+| `load <profile>`, `check` | run a profile |
+| `dump <file> <size> <expr>` | memory to file |
+| `set max N`, `set parallel on\|off` | scan settings |
 
-`find` takes `-c` (code only), `-d` (data only), `-m <module>`, `-n <max>`,
-`-o <offset>` and `-r rip,deref,add:8` to follow what it found. `help <command>`
-in the shell has examples for each.
+`help <command>` has examples.
 
 </details>
 
-Tab completes commands, module names and file paths, history survives restarts
-(`~/.local/state/patty/history`). Ctrl-C stops a scan that takes too long,
-Ctrl-D twice gets you out. You can also pipe a file of commands into
-`patty repl` and it runs them like a script.
+Tab completion, history in `~/.local/state/patty/history`, Ctrl-C cancels a
+scan, Ctrl-D twice quits. You can pipe a file of commands into `patty repl`.
 
-## One-shot commands
-
-For scripts, or when you only need one answer:
+## CLI
 
 ```bash
 patty scan --name Game.exe --module Game.exe --code-only \
@@ -125,18 +100,15 @@ patty list  --name Game.exe --modules
 patty dump  --name Game.exe --address 0x7FF6A0010000 --size 0x1000 -o text.bin
 ```
 
-Add `-o json` to any of them if a program reads the output. The exit code is
-`0` when something was found, `2` when nothing was (or a `check` wasn't all
-clean) and `1` on errors.
+`-o json` for scripts. Exit code 0 = found, 2 = nothing found (or `check` not
+clean), 1 = error.
 
-Files are laid out the way the Windows or Linux loader would map them, so an
-address from `--file Game.exe` is the one IDA shows you, and RVAs from the file
-match the ones from the running game.
+Files get mapped the way the loader would map them, so addresses match IDA and
+RVAs match the running process.
 
 ## Profiles
 
-A profile is a JSON file with the signatures you care about for one game, and
-it's what makes updates bearable:
+Your sigs for one game in a JSON file:
 
 ```json
 {
@@ -150,10 +122,7 @@ it's what makes updates bearable:
 }
 ```
 
-After a patch you run `check` and it tells you, for every signature, whether
-it's still `ok` (and its new RVA), `ambiguous` (matches in several places),
-`missing`, or `unresolved` (matched, but the pointer it leads to is null right
-now). This is from the tutorial, right after the update:
+After a game update:
 
 ```text
 $ patty check --name toygame --profile examples/toygame.json
@@ -165,22 +134,19 @@ Checked 4 pattern(s) over 20 KB in 1.3 ms: 2 ok, 1 ambiguous, 1 missing
   ambiguous   Prologue     21 matches
 ```
 
-Patterns can be `aob` (`ida` works too), `string` or `sso_string` (an MSVC
-`std::string` object). `result_offset` and `resolve` (`"rip"`, `"deref"`,
-`{"type": "add", "extra": 8}`) say how to get from the match to the address you
-want. `check` exits with `2` unless everything is `ok`, so it slots right into
-a script that runs after every update.
+`ok` comes with the new RVA. `unresolved` means it matched but the pointer
+behind it was null. Exit code is 2 unless everything is `ok`.
 
-## Using it as a library
+Pattern keys: `aob` (or `ida`), `string`, `sso_string` (MSVC `std::string`
+object). Optional `result_offset` and `resolve`: `"rip"`, `"deref"`,
+`{"type": "add", "extra": 8}`.
 
-`setup.sh` installs a CMake package, so in your own project:
+## Library
 
 ```cmake
-find_package(patty CONFIG REQUIRED)   # configure with -DCMAKE_PREFIX_PATH=~/.local
+find_package(patty CONFIG REQUIRED)   # -DCMAKE_PREFIX_PATH=~/.local
 target_link_libraries(my_tool PRIVATE patty::patty)
 ```
-
-The tutorial's steps in C++, against the same toy game:
 
 ```cpp
 #include <patty/patty.h>
@@ -219,67 +185,53 @@ PlayerOne has 87.5 hp
 target has 40.0 hp
 ```
 
-A few things that hold everywhere. Opening a target, parsing a pattern or
-profile and scanning a module that isn't loaded throw `patty::Error`, with a
-message that tells you what went wrong. Reads never throw; they hand back a
-`bool`, an `std::optional` or an empty vector. A `Scanner` borrows its target,
-so keep the target alive while you scan. And if you want to scan something
-patty doesn't know (a dump format, a remote machine, a DMA card), derive from
-`patty::Target`, implement `read`, `regions` and `describe`, and every scanner
-feature works on it.
+Opening a target and parsing patterns/profiles throw `patty::Error`. Reads
+don't throw, they return `bool` / `std::optional`. `Scanner` only borrows the
+target. Want to scan something else (dumps, remote memory, DMA)? Subclass
+`patty::Target` and implement `read`, `regions`, `describe`.
 
 <details>
-<summary>What's in the box</summary>
+<summary>API overview</summary>
 
 | | |
 |---|---|
 | `Process` | `open(pid)`, `open("Game.exe")`, `current()`, `find(name)` |
-| `Image` | `open(path)` maps PE/ELF like a loader, `open_raw(path, base)`, `from_bytes(bytes, base)` |
-| `Target` | shared by both: `read<T>`, `read_pointer`, `read_string`, `read_bytes`, `view` (zero-copy), `regions`, `modules`, `module(name)`, `region_at` |
-| `Pattern` | `aob`, `text`, `raw(bytes, mask)`, `integer(v, size)`, `value(x)`, `msvc_string`, chained with `.rip(n)`, `.deref()`, `.add(n)`, `.named(s)` |
-| `Scanner` | `find(pattern)`, `find(patterns)` in one pass, `find_pointer(s)`, `probe`, `check(profile)` |
+| `Image` | `open(path)`, `open_raw(path, base)`, `from_bytes(bytes, base)` |
+| `Target` | `read<T>`, `read_pointer`, `read_string`, `read_bytes`, `view`, `regions`, `modules`, `module(name)`, `region_at` |
+| `Pattern` | `aob`, `text`, `raw`, `integer`, `value`, `msvc_string`; `.rip(n)` `.deref()` `.add(n)` `.named(s)` |
+| `Scanner` | `find`, `find_pointer(s)`, `probe`, `check` |
 | `ScanOptions` | `module`, `code_only`, `data_only`, `max`, `parallel`, `threads`, `filter`, `cancel` |
-| `Profile` | `load(path)`, `parse(json)` |
-| free functions | `pointer_chain`, `rip_relative`, `resolve` |
+| `Profile` | `load`, `parse` |
+| | `pointer_chain`, `rip_relative`, `resolve` |
 
 </details>
 
-## How fast
+## Performance
 
-Measured on an i5-12400F (6 cores, AVX2), release build, best of five:
+i5-12400F, AVX2, release, best of 5:
 
-| | one core | all cores (default) |
+| | 1 thread | all threads (default) |
 |---|---|---|
-| one signature over a 154 MiB binary | 11 to 12 ms | 4.4 to 5 ms |
-| 20 signatures over the same binary | 98 ms | 16 ms |
-| one signature over 1 GiB of a running process | 163 ms | 41 ms |
-| opening that 154 MiB binary | 2 ms | |
+| 1 sig, 154 MiB binary | 11-12 ms | 4.4-5 ms |
+| 20 sigs, same binary | 98 ms | 16 ms |
+| 1 sig, 1 GiB live process | 163 ms | 41 ms |
+| opening the 154 MiB binary | 2 ms | |
 
-The search looks for the two bytes of a signature that are rarest in real
-x86-64 code (the table comes from a byte count over a handful of games and
-libraries) and checks 64 positions at a time with AVX2. So it doesn't matter
-whether your signature starts with something boring like `48`: one core does
-about 20 GB/s either way, which is about as fast as it can read memory anyway.
-Binaries on disk are memory-mapped and scanned in place. Live memory gets
-copied in 256 KiB pieces on every core, and that copy is most of the cost; on
-a single core the kernel spends about two thirds of the time just moving
-bytes.
+It searches for the two rarest bytes of each sig (frequency table from a bunch
+of real game binaries and libs) and checks 64 positions per step with AVX2, so
+a sig starting with `48` isn't any slower. Roughly 20 GB/s per core. Files are
+mmapped and scanned in place. Live memory is read in 256 KiB chunks on all
+cores; most of that time is the kernel copying.
 
-## What it won't do
+## Limitations
 
-It doesn't write memory, freeze values, set breakpoints or disassemble. 32-bit
-Windows games running under the newer WoW64 mode of Wine are reported as
-64-bit. Windows support compiles (checked with MinGW) but hasn't run on an
-actual Windows machine yet, and there's no macOS. The API may still change
-before 1.0.
+- Read-only. No writing, freezing, breakpoints or disassembly.
+- 32-bit games under Wine's new WoW64 mode show up as 64-bit.
+- Windows build compiles (MinGW) but hasn't been run on real Windows yet.
+- No macOS.
+- API can still change before 1.0.
 
-## Optional: MCP server
-
-`mcp/` has a small server that lets Claude Code and other MCP clients drive
-patty. Nothing depends on it; `scripts/setup.sh --mcp` sets it up and
-[mcp/README.md](mcp/README.md) has the details.
-
-## Building by hand
+## Building manually
 
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -288,17 +240,7 @@ ctest --test-dir build
 cmake --install build --prefix ~/.local
 ```
 
-`-DBUILD_SHARED_LIBS=ON` builds a shared library, `-DPATTY_BUILD_CLI=OFF` and
-`-DPATTY_BUILD_TESTS=OFF` leave out the tool and the tests.
-
-```text
-include/patty/   public headers: memory/ (targets), scan/ (patterns, scanner), profile/
-src/             the library
-cli/             the command line tool, cli/repl/ is the shell
-examples/        toygame.c and its profile, used by the tutorial
-scripts/         setup.sh
-mcp/             the optional MCP server
-```
+`-DBUILD_SHARED_LIBS=ON`, `-DPATTY_BUILD_CLI=OFF`, `-DPATTY_BUILD_TESTS=OFF`.
 
 ## License
 
