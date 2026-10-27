@@ -3,6 +3,8 @@
 //   gcc -O1 -o toygame examples/toygame.c && ./toygame &
 //   patty toygame
 //
+// `kill -USR1 <pid>` makes the player take 10 damage.
+//
 // Build with -DPATCH to get "version 1.1": a new field in Player and a new
 // global, the kind of change that moves offsets around in a real update.
 //
@@ -10,6 +12,7 @@
 // this works without setup.sh. The signatures in toygame.json come from a
 // gcc 15 -O1 build; other compilers may need different ones.
 
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/prctl.h>
@@ -34,6 +37,11 @@ __attribute__((noinline)) int same_team(const Player* a, const Player* b) { retu
 #endif
 
 __attribute__((noinline)) float tick(void) { return g_local ? g_local->health : 0.0f; }
+
+static void take_damage(int signal_number) {
+    (void)signal_number;
+    g_local->health -= 10.0f;
+}
 
 int main(void) {
     // Demo only: let a process outside our tree read us under ptrace_scope=1.
@@ -60,9 +68,10 @@ int main(void) {
     printf("toygame 1.0, pid %d\n", getpid());
 #endif
     fflush(stdout);
+    signal(SIGUSR1, take_damage);
     for (;;) {
-        volatile float h = tick();
-        (void)h;
+        if (tick() <= 0.0f)
+            puts("game over");
         sleep(1);
     }
 }

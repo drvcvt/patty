@@ -8,19 +8,23 @@ gets stopped, no `/proc/<pid>/mem`.
 
 ```text
 $ patty toygame
-opened pid 2281406 (toygame)
-patty toygame:2281406> find -c -m toygame -r 3 48 8B 05 ?? ?? ?? ?? 66 0F EF C0 48 85 C0
-Scanned 4 KB in 0.1 ms
-
-1 match
-  $5    0x00005631B5AA21ED -> 0x00005631B5AA5020  toygame+0x11ED r-x
-patty toygame:2281406> x/s [[$5]+8]
-0x00005631B5AA300A  "PlayerOne"
-patty toygame:2281406> p [[$5]+0x10]
-$6 = 0x00005631D081E010  rw- [heap]
-patty toygame:2281406> x/fw $
-0x00005631D081E010  40
+opened pid 2411013 (toygame)
+patty toygame:2411013> findval 87.5
+2 matches  (2.4 MB, 0.5 ms)
+  $1    0x00005589721F12BB  toygame+0x12BB r-x
+  $2    0x00005589858CE030  rw- [heap]
+patty toygame:2411013> filter float decreased
+  $3    0x00005589858CE030  77.5  rw- [heap]
+1 of 2 left
+patty toygame:2411013> refs $3
+1 match  (2.4 MB, 1.6 ms)
+  $4    0x00005589721F4020  toygame+0x4020 rw-
+patty toygame:2411013> read str [[$4]+8]
+0x00005589721F200E  "PlayerOne"
 ```
+
+Between `findval` and `filter` the toy game took 10 damage, so only the real
+health value went down.
 
 ## Install
 
@@ -35,8 +39,8 @@ sudo once at the start, then runs through.
 Flags: `--prefix DIR`, `--no-setcap` (no sudo at all), `--mcp` (optional MCP
 server, see [mcp/README.md](mcp/README.md)), `--jobs N`.
 
-Needs CMake 3.20+, Ninja and a C++20 compiler. nlohmann/json, CLI11,
-GoogleTest and isocline get fetched if you don't have them.
+Needs CMake 3.20+, Ninja and a C++20 compiler. nlohmann/json, GoogleTest and
+isocline get fetched if you don't have them.
 
 **Why sudo:** with `kernel.yama.ptrace_scope=1` (default on most distros) the
 kernel blocks `process_vm_readv` on anything that isn't your own child process,
@@ -59,53 +63,71 @@ patty Game.exe      # process name, pid or a file, whatever you give it
 patty               # empty shell; then `ps` and `open <pid|name|file>`
 ```
 
-Results get numbered like in gdb: `$1`, `$2`, `$` is the last one, and every
-hit shows where it is (`Game.exe+0x11ED r-x`, `rw- [heap]`).
-Expressions work anywhere an address goes: `Game.exe+0x2A4F10`, `[$1]+0x18`
-(brackets read a pointer), `0x` for hex, quotes around module names with a
-dash (`'ld-linux-x86-64.so.2'`).
+Hits get numbered like in gdb (`$1`, `$2`, `$` is the last one) and show where
+they are (`Game.exe+0x11ED r-x`, `rw- [heap]`). `$player = $3` gives one a
+name. Expressions work anywhere an address goes: `Game.exe+0x2A4F10`,
+`[$player]+0x18` (brackets read a pointer), `0x` for hex, quotes around module
+names with a dash (`'ld-linux-x86-64.so.2'`).
+
+`filter` narrows the last hits down like a "next scan" in Cheat Engine:
+`findval 100`, take damage, `filter i32 decreased`, repeat.
 
 <details>
 <summary>commands</summary>
 
 | | |
 |---|---|
-| `open [-raw] <pid\|name\|file>` | open a process or a binary/dump |
-| `ps [text]` | list processes |
+| `open <pid\|name\|file>`, `ps [text]` | open something, list processes |
 | `info`, `maps [text]`, `modules [text]` | what's loaded where |
-| `find [-c] [-d] [-m mod] [-n max] [-r 3] <aob \| "text">` | sig or string search, `-r 3` follows a rip operand at byte 3 |
-| `findval <value> [i8..u64\|float\|double]` | number search |
+| `find [-c] [-d] [-m mod] [-n max] [-r 3] <sig \| text>` | sig or string search, `-r 3` follows a rip operand at byte 3 |
+| `findval <value> [type]` | number search (`i8`..`u64`, `float`, `double`) |
 | `refs <expr>` | pointers to an address |
-| `x[/NFU] <expr>` | examine memory like gdb (`x d u f a s c`, `b h w g`) |
+| `filter <type> <op> [value]` | keep hits that match now (`== != < > <= >=`, `changed`, `decreased`...) |
+| `read [-n count] <type> <expr>` | read values (`i8`..`u64`, `float`, `double`, `ptr`, `str`) |
+| `x[/NFU] <expr>` | examine memory like gdb |
 | `p <expr>` | evaluate, show where it points |
 | `probe [-s size] <expr>` | guess field types of an object |
-| `load <profile>`, `check` | run a profile |
+| `check [profile]` | run a profile |
 | `dump <file> <size> <expr>` | memory to file |
-| `set max N`, `set parallel on\|off` | scan settings |
+| `$name = <expr>`, `vals` | name a value, list them |
 
-`help <command>` has examples.
+`help` groups them by task, `help <command>` has examples.
 
 </details>
 
 Tab completion, history in `~/.local/state/patty/history`, Ctrl-C cancels a
-scan, Ctrl-D twice quits. Piping works too: `patty Game.exe < steps.txt` runs the commands in the file.
+scan, Ctrl-D twice quits.
 
-## CLI
+## Scripts and pipes
 
-```bash
-patty scan --name Game.exe --module Game.exe --code-only \
-           --pattern "48 8B 05 ?? ?? ?? ?? 48 85 C0" --offset 3 --resolve rip
-patty scan --file Game.exe --string "PlayerController"
-patty scan-value   --name Game.exe --value 1337 --size 4 --data-only
-patty scan-pointer --name Game.exe --address 0x7FF6A0010000
-patty probe --name Game.exe --address 0x1D2E4C80
-patty list  --name Game.exe --modules
-patty dump  --name Game.exe --address 0x7FF6A0010000 --size 0x1000 -o text.bin
-patty ps steam
+Every shell command also runs on its own: `patty <target> <command>`. In a pipe
+the output becomes tab-separated lines with the address first, and `-` as an
+argument reads addresses from stdin, so patty feeds patty:
+
+```console
+$ patty toygame findval 87.5 | patty toygame read float - > hp.txt
+2 matches  (2.4 MB, 0.7 ms)
+$ kill -USR1 2408655                      # toygame takes 10 damage
+$ patty toygame filter float decreased - < hp.txt
+0x000055EBDC5BC030	77.5
+1 of 2 left
+$ patty toygame find -c -r 3 "48 8B 05 ?? ?? ?? ?? 66 0F EF C0 48 85 C0" | patty toygame read ptr -
+1 match  (1.6 MB, 0.3 ms)
+0x000055EBDBD85020	0x000055EBDC5BC030
+$ patty --json toygame read float "[toygame+0x4020]"
+{"address":"0x000055EBDC5BC030","type":"float","value":77.5}
 ```
 
-`-o json` for scripts. Exit code 0 = found, 2 = nothing found (or `check` not
-clean), 1 = error.
+- Status lines ("2 matches") go to stderr, stdout only carries results.
+- Quote signatures and `[...]` on the command line, or your shell expands them.
+- `filter ... changed`/`decreased` compares against the second column of its
+  input, which is what `read` printed earlier.
+- `--json` gives one JSON object per line, `--table` the human format, `--lines`
+  the tab format even on a terminal.
+- `PATTY_TARGET=toygame` lets you leave the target out.
+- A file of commands piped into `patty <target>` runs as a script.
+- Exit code 0 = found something, 2 = nothing found (or `check` not clean),
+  1 = error.
 
 Files get mapped the way the loader would map them, so addresses match IDA and
 RVAs match the running process.
@@ -129,13 +151,13 @@ Your sigs for one game in a JSON file:
 After a game update:
 
 ```text
-$ patty check --name toygame --profile examples/toygame.json
-Checked 4 pattern(s) over 20 KB in 1.3 ms: 2 ok, 1 ambiguous, 1 missing
+$ patty toygame check examples/toygame.json
+Checked 4 pattern(s) over 20 KB in 0.3 ms: 2 ok, 1 ambiguous, 1 missing
 
-  ok          LocalPlayer  0x00005557D57A7028  rva 0x00004028
-  ok          Tick         0x00005557D57A41F8  rva 0x000011F8
+  ok          LocalPlayer  0x000055B371D0E028  rva 0x00004028
+  ok          Tick         0x000055B371D0B256  rva 0x00001256
   missing     HealthRead
-  ambiguous   Prologue     21 matches
+  ambiguous   Prologue     26 matches
 ```
 
 `ok` comes with the new RVA. `unresolved` means it matched but the pointer
