@@ -1,4 +1,5 @@
 #include "session.h"
+#include "value_type.h"
 #include "../output.h"
 
 #include <cctype>
@@ -92,30 +93,78 @@ std::string format_unit(const uint8_t* data, const Format& f) {
 
 } // namespace
 
-void Session::cmd_examine(Args& args) {
+int Session::cmd_read(Args& args) {
+    size_t count = 1;
+    if (!args.done() && args.tokens[args.next].text == "-n") {
+        args.take();
+        const auto parsed = parse_number(args.take().text);
+        if (!parsed || *parsed == 0 || *parsed > 4096)
+            throw Error("-n needs a count from 1 to 4096");
+        count = static_cast<size_t>(*parsed);
+    }
+    const auto type = ValueType::parse(args.take().text);
     auto& t = target();
-    const auto address = static_cast<uintptr_t>(eval(args.rest()));
+    const size_t width = t.pointer_size();
+    const size_t size = type.size(width);
+    const auto starts = addresses(args);
+    const bool many = starts.size() * count > 1;
+
+    m_hits.clear();
+    for (const Address start : starts) {
+        for (size_t i = 0; i < count; ++i) {
+            const Address at = start + i * size;
+            std::vector<uint8_t> bytes;
+            if (type.kind() == ValueType::Kind::String) {
+                if (const auto text = t.read_string(at, 512))
+                    bytes.assign(text->begin(), text->end());
+                else if (!many)
+                    throw Error("cannot read at " + hex(at, width));
+                else
+                    continue;
+            } else {
+                bytes = t.read_bytes(at, size);
+                if (bytes.empty()) {
+                    if (!many)
+                        throw Error("cannot read " + std::to_string(size) + " bytes at " + hex(at, width));
+                    m_out.err() << "cannot read " << hex(at, width) << '\n';
+                    continue;
+                }
+            }
+            const auto shown = type.format(bytes);
+            const auto table_value = type.kind() == ValueType::Kind::String ? "\"" + shown + "\"" : shown;
+            m_out.record(hex(at, width) + "  " + table_value, {hex(at, width), shown},
+                         {{"address", hex(at, width)}, {"type", type.name()}, {"value", type.to_json(bytes)}});
+            m_hits.push_back({at, std::move(bytes)});
+        }
+    }
+    return m_hits.empty() ? 2 : 0;
+}
+
+int Session::cmd_examine(Args& args) {
+    auto& t = target();
+    const auto address = static_cast<Address>(eval(args.rest()));
+    auto& out = m_out.text();
     const size_t width = t.pointer_size();
 
     if (args.suffix.empty()) {
         const auto bytes = t.read_bytes(address, 64);
         if (bytes.empty())
             throw Error("cannot read 64 bytes at " + hex(address, width));
-        print_hexdump(m_out, address, bytes, width);
-        return;
+        print_hexdump(out, address, bytes, width);
+        return 0;
     }
 
     const auto f = parse_format(args.suffix, width);
     if (f.format == 's') {
-        uintptr_t at = address;
+        Address at = address;
         for (size_t i = 0; i < f.count; ++i) {
             const auto text = t.read_string(at, 512);
             if (!text)
                 throw Error("cannot read at " + hex(at, width));
-            m_out << hex(at, width) << "  \"" << *text << "\"\n";
+            out << hex(at, width) << "  \"" << *text << "\"\n";
             at += text->size() + 1;
         }
-        return;
+        return 0;
     }
 
     const auto bytes = t.read_bytes(address, f.count * f.unit);
@@ -126,33 +175,38 @@ void Session::cmd_examine(Args& args) {
         for (size_t i = 0; i < f.count; ++i) {
             uint64_t value = 0;
             std::memcpy(&value, bytes.data() + i * f.unit, f.unit);
-            m_out << hex(address + i * f.unit, width) << "  " << hex(value, width);
-            if (const auto place = where(static_cast<uintptr_t>(value)); place != "unmapped")
-                m_out << "  " << place;
-            m_out << '\n';
+            out << hex(address + i * f.unit, width) << "  " << hex(value, width);
+            if (const auto place = where(static_cast<Address>(value)); place != "unmapped")
+                out << "  " << place;
+            out << '\n';
         }
-        return;
+        return 0;
     }
 
     const size_t per_line = f.format == 'c' ? 8 : std::max<size_t>(1, 16 / f.unit);
     for (size_t i = 0; i < f.count; ++i) {
         if (i % per_line == 0)
-            m_out << (i ? "\n" : "") << hex(address + i * f.unit, width) << ' ';
-        m_out << ' ' << format_unit(bytes.data() + i * f.unit, f);
+            out << (i ? "\n" : "") << hex(address + i * f.unit, width) << ' ';
+        out << ' ' << format_unit(bytes.data() + i * f.unit, f);
     }
-    m_out << '\n';
+    out << '\n';
+    return 0;
 }
 
-void Session::cmd_print(Args& args) {
-    const auto value = static_cast<uintptr_t>(eval(args.rest()));
+int Session::cmd_print(Args& args) {
     const size_t width = m_target ? m_target->pointer_size() : 8;
-    m_out << remember(value) << " = " << hex(value, width);
-    if (m_target)
-        m_out << "  " << where(value);
-    m_out << '\n';
+    const auto values = addresses(args);
+    const auto modules = m_target ? m_target->modules() : std::vector<Module>{};
+    const auto regions = m_target ? m_target->regions() : std::vector<Region>{};
+    for (const Address value : values) {
+        const auto place = m_target ? where(value, modules, regions) : std::string{};
+        m_out.record(remember(value) + " = " + hex(value, width) + (place.empty() ? "" : "  " + place),
+                     {hex(value, width), place}, {{"value", hex(value, width)}, {"where", place}});
+    }
+    return 0;
 }
 
-void Session::cmd_probe(Args& args) {
+int Session::cmd_probe(Args& args) {
     size_t size = 0x100;
     if (!args.done() && args.tokens[args.next].text == "-s") {
         args.take();
@@ -161,16 +215,41 @@ void Session::cmd_probe(Args& args) {
             throw Error("-s needs a size");
         size = static_cast<size_t>(*parsed);
     }
-    const auto address = static_cast<uintptr_t>(eval(args.rest()));
-    print_probe(m_out, Scanner(target()).probe(address, size), target().pointer_size());
+    const size_t width = target().pointer_size();
+    Scanner scanner(target());
+    size_t fields = 0;
+    for (const Address address : addresses(args)) {
+        const auto probe = scanner.probe(address, size);
+        if (probe.fields.empty()) {
+            m_out.err() << "nothing readable at " << hex(address, width) << '\n';
+            continue;
+        }
+        m_out.info() << "Probed " << human_size(probe.size) << " at " << hex(address, width)
+                     << (m_out.table() ? "\n\n" : "\n");
+        for (const auto& field : probe.fields) {
+            const Address at = address + field.offset;
+            std::ostringstream line;
+            line << "  +" << std::left << std::setw(6) << hex_short(field.offset).substr(2)
+                 << std::setw(static_cast<int>(width * 2 + 4)) << hex(field.raw, width) << std::setw(12)
+                 << to_string(field.kind) << field.detail;
+            std::string text = line.str();
+            text.erase(text.find_last_not_of(' ') + 1);
+            m_out.record(text, {hex(at, width), hex_short(field.offset), std::string(to_string(field.kind)),
+                                hex(field.raw, width), field.detail},
+                         {{"address", hex(at, width)}, {"offset", field.offset}, {"kind", to_string(field.kind)},
+                          {"raw", hex(field.raw, width)}, {"detail", field.detail}});
+            ++fields;
+        }
+    }
+    return fields ? 0 : 2;
 }
 
-void Session::cmd_dump(Args& args) {
+int Session::cmd_dump(Args& args) {
     const std::string path = args.take().text;
     const auto size = parse_number(args.take().text);
     if (!size || *size == 0)
         throw Error("usage: dump <file> <size> <expr>");
-    const auto address = static_cast<uintptr_t>(eval(args.rest()));
+    const auto address = static_cast<Address>(eval(args.rest()));
     const auto bytes = target().read_bytes(address, static_cast<size_t>(*size));
     if (bytes.empty())
         throw Error("cannot read " + std::to_string(*size) + " bytes at " + hex(address, target().pointer_size()));
@@ -178,7 +257,8 @@ void Session::cmd_dump(Args& args) {
     out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
     if (!out.flush())
         throw Error("cannot write " + path);
-    m_out << "wrote " << human_size(bytes.size()) << " to " << path << '\n';
+    m_out.info() << "wrote " << human_size(bytes.size()) << " to " << path << '\n';
+    return 0;
 }
 
 } // namespace patty::cli

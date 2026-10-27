@@ -1,8 +1,8 @@
 // Interactive loop: line editing, history, completion and Ctrl-C.
 // Commands themselves live in Session.
 
+#include "repl.h"
 #include "session.h"
-#include "../commands.h"
 
 #include <isocline.h>
 
@@ -66,7 +66,7 @@ bool is_word_char(const char* s, long length) {
     if (length != 1)
         return false;
     const char c = *s;
-    return std::isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '_' || c == '-';
+    return std::isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '_' || c == '-' || c == '$';
 }
 
 void complete_words(ic_completion_env_t* env, const char* word) {
@@ -89,7 +89,7 @@ void complete(ic_completion_env_t* env, const char* input) {
         ic_complete_filename(env, input, 0, nullptr, nullptr);
         return;
     }
-    g_completion.words = g_completion.session->module_names();
+    g_completion.words = g_completion.session->completion_words();
     ic_complete_word(env, input, &complete_words, &is_word_char);
 }
 
@@ -119,29 +119,45 @@ int interactive(Session& session) {
         interrupted_once = false;
         const std::string line(raw);
         ic_free(raw);
-        if (!session.execute(line))
+        session.execute(line);
+        if (session.quit_requested())
             break;
     }
     return 0;
 }
 
-// Piped input: no editing, no prompt, just run lines. Used by scripts and tests.
-int batch(Session& session) {
+// Piped input: no editing, no prompt, just run lines.
+int script(Session& session) {
+    int status = 0;
     std::string line;
-    while (std::getline(std::cin, line))
-        if (!session.execute(line))
+    while (std::getline(std::cin, line)) {
+        if (session.execute(line) == 1)
+            status = 1;
+        // Keep results and errors in order when both go to the same place.
+        std::cout.flush();
+        if (session.quit_requested())
             break;
-    return 0;
+    }
+    return status;
 }
 
 } // namespace
 
-int run_repl(const TargetArgs& target) {
-    Session session(std::cout);
-    const bool tty = PATTY_ISATTY(PATTY_FILENO(stdin));
+bool stdin_is_terminal() {
+    return PATTY_ISATTY(PATTY_FILENO(stdin));
+}
+
+bool stdout_is_terminal() {
+    return PATTY_ISATTY(PATTY_FILENO(stdout));
+}
+
+int run_shell(const TargetArgs& target, Mode mode) {
+    Output out(std::cout, std::cerr, mode);
+    Session session(out);
+    const bool tty = stdin_is_terminal();
     if (tty) {
         // Ctrl-C cancels the running scan instead of killing the session.
-        // Piped sessions keep the default so a stuck script can still be killed.
+        // Scripts keep the default so a stuck one can still be killed.
         g_cancel = &session.cancel_flag();
         std::signal(SIGINT, on_interrupt);
     }
@@ -150,10 +166,26 @@ int run_repl(const TargetArgs& target) {
         try {
             session.open(target);
         } catch (const Error& e) {
-            std::cout << "error: " << e.what() << '\n';
+            std::cerr << "error: " << e.what() << '\n';
+            if (!tty)
+                return 1;
         }
     }
-    return tty ? interactive(session) : batch(session);
+    return tty ? interactive(session) : script(session);
+}
+
+int run_once(const TargetArgs& target, const std::string& command, Mode mode) {
+    Output out(std::cout, std::cerr, mode);
+    Session session(out, true);
+    if (!target.empty()) {
+        try {
+            session.open(target, false);
+        } catch (const Error& e) {
+            std::cerr << "patty: " << e.what() << '\n';
+            return 1;
+        }
+    }
+    return session.execute(command);
 }
 
 } // namespace patty::cli

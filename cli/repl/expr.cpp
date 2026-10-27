@@ -109,6 +109,18 @@ private:
 
     uint64_t history() {
         const size_t start = m_pos++;
+        if (m_pos < m_text.size() && (std::isalpha(static_cast<unsigned char>(m_text[m_pos])) || m_text[m_pos] == '_')) {
+            std::string name;
+            while (m_pos < m_text.size() && (std::isalnum(static_cast<unsigned char>(m_text[m_pos])) || m_text[m_pos] == '_'))
+                name.push_back(m_text[m_pos++]);
+            const std::string unset = "$" + name + " is not set (set it with: $" + name + " = <expr>)";
+            if (!m_context.names)
+                fail(unset, start);
+            const auto found = m_context.names->find(name);
+            if (found == m_context.names->end())
+                fail(unset, start);
+            return found->second;
+        }
         size_t index = 0;
         bool digits = false;
         while (m_pos < m_text.size() && std::isdigit(static_cast<unsigned char>(m_text[m_pos]))) {

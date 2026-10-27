@@ -1,11 +1,11 @@
 #include "session.h"
 #include "expr.h"
-#include "../output.h"
 
 #include <algorithm>
 #include <cctype>
 #include <iomanip>
-#include <ostream>
+#include <iostream>
+#include <sstream>
 
 namespace patty::cli {
 
@@ -59,9 +59,14 @@ size_t require_number(const std::string& text) {
     return static_cast<size_t>(*value);
 }
 
+bool is_name(std::string_view text) {
+    return !text.empty() && (std::isalpha(static_cast<unsigned char>(text[0])) || text[0] == '_') &&
+           std::all_of(text.begin(), text.end(), [](unsigned char c) { return std::isalnum(c) || c == '_'; });
+}
+
 } // namespace
 
-// --- argument handling ---------------------------------------------------
+// --- arguments -----------------------------------------------------------
 
 const Session::Token& Session::Args::take() {
     if (done())
@@ -72,78 +77,89 @@ const Session::Token& Session::Args::take() {
 std::string_view Session::Args::rest() const {
     if (done())
         return {};
+    if (next + 1 == tokens.size() && tokens[next].quoted)
+        return tokens[next].text;
     return raw.substr(tokens[next].offset);
 }
 
-// --- dispatch ------------------------------------------------------------
+// --- commands ------------------------------------------------------------
 
 const std::vector<Session::Command>& Session::commands() {
     static const std::vector<Command> table = {
-        {"open", "o", "open [-raw] <pid|name|file>", "open a process or a file",
-         "A number is a pid, an existing file is opened as a binary, anything else is\n"
-         "a process name. Same as starting the shell with `patty <target>`.\n\n"
+        {"open", "o", "target", "open <pid|name|file>", "open a process, a binary or a dump",
+         "A number is a pid, an existing file is a file, anything else a process name.\n"
+         "-raw loads a file flat at address 0 instead of mapping its PE/ELF sections.\n\n"
          "  open toygame\n  open 4242\n  open ~/dumps/Game.exe",
          &Session::cmd_open},
-        {"ps", nullptr, "ps [text]", "list processes",
-         "  ps\n  ps game", &Session::cmd_ps},
-        {"proc", nullptr, "proc <pid|name>", "open a running process",
-         "Opens a process read-only. Names match case-insensitively; Wine/Proton\n"
-         "games are found by their .exe name.\n\n  proc 4242\n  proc Game.exe",
-         &Session::cmd_proc},
-        {"file", nullptr, "file [-raw] <path>", "open a binary or dump",
-         "PE and ELF files are mapped like a loader would (sections at their virtual\n"
-         "addresses). -raw loads the bytes flat at address 0.\n\n  file ~/dumps/Game.exe",
-         &Session::cmd_file},
-        {"close", nullptr, "close", "drop the current target", "", &Session::cmd_close},
-        {"info", "i", "info", "describe the current target", "", &Session::cmd_info},
-        {"maps", nullptr, "maps [text]", "list readable regions",
-         "Lists regions, optionally only those whose name contains <text>.\n\n  maps\n  maps heap",
-         &Session::cmd_maps},
-        {"modules", "mods", "modules [text]", "list loaded modules", "", &Session::cmd_modules},
-        {"find", "f", "find [flags] <aob | \"text\">", "search for a byte pattern or string",
-         "Flags:\n"
-         "  -c          executable regions only     -d   writable data only\n"
-         "  -m <mod>    only inside a module         -n N stop after N matches\n"
-         "  -o <n>      add n to each match          -r   resolve: rip,deref,add:8\n"
-         "  -r <n>      the rel32 operand sits at offset n (same as -o n -r rip)\n"
-         "  -s          \"text\" is an MSVC std::string object, not raw characters\n\n"
-         "Every match becomes a $N value.\n\n"
-         "  find 48 8B 05 ?? ?? ?? ?? 48 85 C0\n"
+        {"ps", nullptr, "target", "ps [text]", "list processes", "  ps\n  ps game", &Session::cmd_ps},
+        {"info", "i", "target", "info", "what's open", "", &Session::cmd_info},
+        {"maps", nullptr, "target", "maps [text]", "readable regions", "  maps\n  maps heap", &Session::cmd_maps},
+        {"modules", "mods", "target", "modules [text]", "loaded modules", "", &Session::cmd_modules},
+        {"close", nullptr, "target", "close", "drop the target", "", &Session::cmd_close},
+
+        {"find", "f", "search", "find [flags] <sig | text>", "search for a signature or a string",
+         "Hex bytes with ?? wildcards are a signature, anything else is searched as\n"
+         "text. Quote text that has spaces.\n\n"
+         "  -c        code only            -d   writable data only\n"
+         "  -m <mod>  inside one module    -n N stop after N hits\n"
+         "  -r 3      follow the rip-relative operand at byte 3\n"
+         "  -o <n>    add n to each hit    -r rip,deref,add:8  any resolve steps\n"
+         "  -s        text is an MSVC std::string object\n\n"
          "  find -c -m Game.exe -r 3 48 8B 05 ?? ?? ?? ??\n"
-         "  find \"PlayerController\"",
+         "  find PlayerController",
          &Session::cmd_find},
-        {"findval", "fv", "findval [flags] <value> [type]", "search for a number",
-         "Types: i8 i16 i32 i64 u8 u16 u32 u64 float double. Default is i32, or\n"
-         "float when the value has a decimal point. Same flags as find.\n\n"
+        {"findval", "fv", "search", "findval [flags] <value> [type]", "search for a number",
+         "Types: i8 i16 i32 i64 u8 u16 u32 u64 float double. Default i32, or float when\n"
+         "the value has a decimal point. Same flags as find.\n\n"
          "  findval 1337\n  findval 87.5\n  findval -d 0x7FF6A0010000 u64",
          &Session::cmd_findval},
-        {"refs", nullptr, "refs [flags] <expr>", "find pointers to an address",
+        {"refs", nullptr, "search", "refs [flags] <expr|->", "find pointers to an address",
          "  refs $1\n  refs -d Game.exe+0x2A4F10", &Session::cmd_refs},
-        {"x", nullptr, "x[/NFU] <expr>", "examine memory",
+        {"filter", nullptr, "search", "filter <type> <op> [value] [-]", "keep the hits whose value matches now",
+         "Works on the hits of the last find/findval/refs/read/filter, or on the\n"
+         "addresses piped in with -. Ops: == != < > <= >=, and changed, unchanged,\n"
+         "increased, decreased (against the value at the last look).\n\n"
+         "  findval 100\n  filter i32 == 90\n  filter i32 decreased",
+         &Session::cmd_filter},
+
+        {"read", "r", "memory", "read [-n count] <type> <expr|->", "read typed values",
+         "Types: i8 .. u64, float, double, ptr, str.\n\n"
+         "  read float $2\n  read str [[$5]+8]\n  read -n 4 i32 [$1]",
+         &Session::cmd_read},
+        {"x", nullptr, "memory", "x[/NFU] <expr>", "examine memory, gdb style",
          "Without /: hex dump of 64 bytes. Otherwise N units in format F of size U:\n"
          "  F: x hex  d signed  u unsigned  f float  a address  s string  c char\n"
          "  U: b 1    h 2       w 4         g 8\n\n"
-         "  x $1\n  x/8xg [Game.exe+0x2A4F10]\n  x/4f $2+0x30\n  x/s $3",
+         "  x $1\n  x/8xg [Game.exe+0x2A4F10]\n  x/s $3",
          &Session::cmd_examine},
-        {"print", "p", "print <expr>", "evaluate an address expression",
-         "Expressions: numbers (0x for hex), module names (quote ones with '-'),\n"
-         "$ and $N values, [expr] to read a pointer, + - * / and parentheses.\n\n"
-         "  p Game.exe+0x2A4F10\n  p [[$1]+0x18]\n  p 'ld-linux-x86-64.so.2'",
+        {"print", "p", "memory", "p <expr|->", "evaluate an address, show where it points",
+         "Numbers (0x for hex), module names (quote names with '-'), $ $N $name,\n"
+         "[expr] reads a pointer, + - * / and parentheses.\n\n"
+         "  p Game.exe+0x2A4F10\n  p [[$1]+0x18]",
          &Session::cmd_print},
-        {"probe", nullptr, "probe [-s size] <expr>", "guess what each field of an object is",
+        {"probe", nullptr, "memory", "probe [-s size] <expr|->", "guess what each field of an object is",
          "  probe [$1]\n  probe -s 0x80 $2", &Session::cmd_probe},
-        {"dump", nullptr, "dump <file> <size> <expr>", "write memory to a file",
+        {"dump", nullptr, "memory", "dump <file> <size> <expr>", "write memory to a file",
          "  dump player.bin 0x400 [$1]", &Session::cmd_dump},
-        {"load", nullptr, "load <profile.json>", "load a signature profile", "", &Session::cmd_load},
-        {"check", nullptr, "check [-m module]", "check the loaded profile against the target",
+
+        {"check", nullptr, "profiles", "check [-m module] [profile.json]", "check a signature profile",
          "Each signature comes back ok (unique, with its RVA), ambiguous, missing or\n"
-         "unresolved. ok values become $N.",
+         "unresolved. The profile is remembered, later checks can leave it out.",
          &Session::cmd_check},
-        {"set", nullptr, "set [max N | parallel on|off]", "show or change scan settings", "", &Session::cmd_set},
-        {"help", "h", "help [command]", "list commands or explain one", "", &Session::cmd_help},
-        {"quit", "q", "quit", "leave (Ctrl-D twice works too)", "", nullptr},
+
+        {"vals", nullptr, "shell", "vals", "list $names and recent $N", "", &Session::cmd_vals},
+        {"set", nullptr, "shell", "set [max N | parallel on|off]", "scan settings", "", &Session::cmd_set},
+        {"help", "h", "shell", "help [command]", "this, or details on one command", "", &Session::cmd_help},
+        {"quit", "q", "shell", "quit", "leave (Ctrl-D twice works too)", "", nullptr},
     };
     return table;
+}
+
+bool Session::is_command(std::string_view word) {
+    const auto& table = commands();
+    return std::any_of(table.begin(), table.end(), [&](const Command& c) {
+        return word == c.name || (c.alias && word == c.alias) || word.starts_with("x/");
+    });
 }
 
 std::vector<std::string> Session::command_names() {
@@ -153,11 +169,29 @@ std::vector<std::string> Session::command_names() {
     return names;
 }
 
-bool Session::execute(std::string_view line) {
+int Session::execute(std::string_view line) {
     while (!line.empty() && std::isspace(static_cast<unsigned char>(line.front())))
         line.remove_prefix(1);
+    while (!line.empty() && std::isspace(static_cast<unsigned char>(line.back())))
+        line.remove_suffix(1);
     if (line.empty() || line.front() == '#')
-        return true;
+        return 0;
+
+    // $name = expression
+    if (line.front() == '$') {
+        const auto equals = line.find('=');
+        if (equals != std::string_view::npos && line.substr(equals, 2) != "==") {
+            auto name = line.substr(1, equals - 1);
+            while (!name.empty() && std::isspace(static_cast<unsigned char>(name.back())))
+                name.remove_suffix(1);
+            try {
+                return assign(name, line.substr(equals + 1));
+            } catch (const std::exception& e) {
+                m_out.err() << "error: " << e.what() << '\n';
+                return 1;
+            }
+        }
+    }
 
     const auto word_end = line.find_first_of(" \t");
     std::string word(line.substr(0, word_end));
@@ -174,51 +208,78 @@ bool Session::execute(std::string_view line) {
     });
     if (command == table.end()) {
         const auto close = suggest(word);
-        m_out << "unknown command \"" << word << "\""
-              << (close.empty() ? ", try help" : ", did you mean " + close + "?") << '\n';
-        return true;
+        m_out.err() << "unknown command \"" << word << "\""
+                    << (close.empty() ? ", try help" : ", did you mean " + close + "?") << '\n';
+        return 1;
     }
-    if (!command->run)
-        return false;
+    if (!command->run) {
+        m_quit = true;
+        return 0;
+    }
 
     try {
         args.tokens = tokenize(args.raw);
         m_cancel = false;
-        (this->*command->run)(args);
-    } catch (const Error& e) {
-        m_out << "error: " << e.what() << '\n';
+        return (this->*command->run)(args);
     } catch (const std::exception& e) {
-        m_out << "error: " << e.what() << '\n';
+        m_out.err() << "error: " << e.what() << '\n';
+        return 1;
     }
-    return true;
 }
 
 // --- helpers -------------------------------------------------------------
 
 Target& Session::target() {
     if (!m_target)
-        throw Error("no target yet, open one with proc or file");
+        throw Error("nothing open yet: open <pid|name|file>");
     return *m_target;
 }
 
 uint64_t Session::eval(std::string_view expression) {
     if (expression.empty())
         throw Error("missing address expression");
-    return evaluate(expression, {m_target.get(), m_values});
+    return evaluate(expression, {m_target.get(), m_values, &m_names});
 }
 
-std::string Session::remember(uintptr_t value) {
+const std::vector<Session::InputLine>& Session::input() {
+    if (!m_stdin_data)
+        throw Error("\"-\" reads addresses from a pipe: patty <target> <command> ... -");
+    if (!m_input) {
+        m_input.emplace();
+        std::string line;
+        while (std::getline(std::cin, line)) {
+            std::istringstream fields(line);
+            std::string first, second;
+            fields >> first >> second;
+            if (const auto address = parse_number(first))
+                m_input->push_back({static_cast<Address>(*address), second});
+        }
+    }
+    return *m_input;
+}
+
+std::vector<Address> Session::addresses(const Args& args) {
+    if (args.rest() == "-") {
+        std::vector<Address> result;
+        for (const auto& line : input())
+            result.push_back(line.address);
+        return result;
+    }
+    return {static_cast<Address>(eval(args.rest()))};
+}
+
+std::string Session::remember(Address value) {
     m_values.push_back(value);
     return "$" + std::to_string(m_values.size());
 }
 
-std::string Session::where(uintptr_t address) {
+std::string Session::where(Address address) {
     if (!m_target)
         return {};
     return where(address, m_target->modules(), m_target->regions());
 }
 
-std::string Session::where(uintptr_t address, const std::vector<Module>& modules,
+std::string Session::where(Address address, const std::vector<Module>& modules,
                            const std::vector<Region>& regions) {
     std::string text;
     const Module* module = nullptr;
@@ -297,18 +358,6 @@ ScanOptions Session::scan_flags(Args& args, const FlagHandler& extra) {
     return options;
 }
 
-void Session::show(const std::vector<ScanResult>& results, const ScanOptions& options) {
-    const size_t width = target().pointer_size();
-    const auto modules = target().modules();
-    const auto regions = target().regions();
-    print_results(m_out, results, width,
-                  [this](const Match& m) { return remember(m.value()); },
-                  [&](const Match& m) { return where(m.address, modules, regions); });
-    for (const auto& result : results)
-        if (options.max && result.size() >= options.max)
-            m_out << "  (stopped at " << options.max << ", use -n or \"set max\" for more)\n";
-}
-
 std::string Session::prompt() const {
     if (!m_target)
         return "patty";
@@ -317,22 +366,38 @@ std::string Session::prompt() const {
     return "patty " + static_cast<const Image*>(m_target.get())->name();
 }
 
-std::vector<std::string> Session::module_names() {
-    std::vector<std::string> names;
+std::vector<std::string> Session::completion_words() {
+    std::vector<std::string> words;
     if (m_target)
         for (const auto& module : m_target->modules())
-            names.push_back(module.name);
-    return names;
+            words.push_back(module.name);
+    for (const auto& [name, value] : m_names)
+        words.push_back("$" + name);
+    return words;
 }
 
-void Session::open(const TargetArgs& args) {
+void Session::open(const TargetArgs& args, bool announce) {
     m_target = open_target(args);
-    m_out << "opened " << m_target->describe() << '\n';
+    m_hits.clear();
+    if (announce)
+        m_out.info() << "opened " << m_target->describe() << '\n';
+}
+
+int Session::assign(std::string_view name, std::string_view expression) {
+    if (!is_name(name))
+        throw Error("bad name \"$" + std::string(name) + "\" (letters, digits, _)");
+    const auto value = static_cast<Address>(eval(expression));
+    m_names[std::string(name)] = value;
+    const size_t width = m_target ? m_target->pointer_size() : 8;
+    const auto place = where(value);
+    m_out.record("$" + std::string(name) + " = " + hex(value, width) + (place.empty() ? "" : "  " + place),
+                 {hex(value, width), place}, {{"name", name}, {"value", hex(value, width)}, {"where", place}});
+    return 0;
 }
 
 // --- target commands -----------------------------------------------------
 
-void Session::cmd_open(Args& args) {
+int Session::cmd_open(Args& args) {
     bool raw = false;
     if (!args.done() && args.tokens[args.next].text == "-raw") {
         raw = true;
@@ -340,187 +405,100 @@ void Session::cmd_open(Args& args) {
     }
     if (args.done())
         throw Error("usage: open [-raw] <pid|name|file>");
-    const auto& first = args.tokens[args.next];
-    open(guess_target(first.quoted ? std::string_view(first.text) : args.rest(), raw));
+    open(guess_target(args.rest(), raw));
+    return 0;
 }
 
-void Session::cmd_ps(Args& args) {
+int Session::cmd_ps(Args& args) {
     const auto filter = std::string(args.rest());
     size_t shown = 0;
     for (const auto& process : Process::list()) {
         if (!filter.empty() && !contains_ci(process.name, filter))
             continue;
-        m_out << std::right << std::setw(8) << process.pid << "  " << process.name << '\n';
+        std::ostringstream line;
+        line << std::setw(8) << process.pid << "  " << process.name;
+        m_out.record(line.str(), {std::to_string(process.pid), process.name},
+                     {{"pid", process.pid}, {"name", process.name}});
         ++shown;
     }
     if (shown == 0)
-        m_out << "no process matches \"" << filter << "\"\n";
+        m_out.info() << "no process matches \"" << filter << "\"\n";
+    return shown ? 0 : 2;
 }
 
-void Session::cmd_proc(Args& args) {
-    const std::string which = args.take().text;
-    TargetArgs target;
-    if (const auto pid = parse_number(which))
-        target.pid = static_cast<uint32_t>(*pid);
-    else
-        target.name = which;
-    open(target);
-}
-
-void Session::cmd_file(Args& args) {
-    TargetArgs target;
-    if (!args.done() && args.tokens[args.next].text == "-raw") {
-        target.raw = true;
-        args.take();
-    }
-    target.file = std::string(args.rest());
-    if (!args.done() && args.tokens[args.next].quoted)
-        target.file = args.tokens[args.next].text;
-    if (target.file.empty())
-        throw Error("usage: file [-raw] <path>");
-    open(target);
-}
-
-void Session::cmd_close(Args&) {
+int Session::cmd_close(Args&) {
     m_target.reset();
-    m_out << "closed\n";
+    m_hits.clear();
+    m_out.info() << "closed\n";
+    return 0;
 }
 
-void Session::cmd_info(Args&) {
+int Session::cmd_info(Args&) {
     auto& t = target();
     const auto regions = t.regions();
+    const auto modules = t.modules();
     size_t bytes = 0;
     for (const auto& region : regions)
         bytes += region.size;
-    m_out << t.describe() << '\n'
-          << "  " << t.pointer_size() * 8 << "-bit, " << regions.size()
-          << (regions.size() == 1 ? " region, " : " regions, ")
-          << human_size(bytes) << " readable, " << t.modules().size()
-          << (t.modules().size() == 1 ? " module\n" : " modules\n");
+    auto& out = m_out.text();
+    out << t.describe() << '\n'
+        << "  " << t.pointer_size() * 8 << "-bit, " << regions.size() << (regions.size() == 1 ? " region, " : " regions, ")
+        << human_size(bytes) << " readable, " << modules.size() << (modules.size() == 1 ? " module\n" : " modules\n");
     if (m_profile)
-        m_out << "  profile " << (m_profile->name.empty() ? "(unnamed)" : m_profile->name) << ", "
-              << m_profile->patterns.size() << " patterns\n";
-    if (!m_values.empty())
-        m_out << "  values $1..$" << m_values.size() << '\n';
+        out << "  profile " << (m_profile->name.empty() ? "(unnamed)" : m_profile->name) << ", "
+            << m_profile->patterns.size() << " patterns\n";
+    if (!m_hits.empty())
+        out << "  " << m_hits.size() << " hits to filter\n";
+    return 0;
 }
 
-void Session::cmd_maps(Args& args) {
-    auto regions = target().regions();
-    if (const auto filter = args.rest(); !filter.empty())
-        std::erase_if(regions, [&](const Region& r) { return !contains_ci(r.name, filter); });
-    print_regions(m_out, regions, target().pointer_size());
-}
-
-void Session::cmd_modules(Args& args) {
-    auto modules = target().modules();
-    if (const auto filter = args.rest(); !filter.empty())
-        std::erase_if(modules, [&](const Module& m) { return !contains_ci(m.name, filter); });
-    print_modules(m_out, modules, target().pointer_size());
-}
-
-// --- scanning ------------------------------------------------------------
-
-void Session::cmd_find(Args& args) {
-    int64_t offset = 0;
-    std::string resolve;
-    bool msvc = false;
-    auto options = scan_flags(args, [&](const std::string& flag, Args& a) {
-        if (flag == "-o")
-            offset = static_cast<int64_t>(require_number(a.take().text));
-        else if (flag == "-r") {
-            // "-r 3" is short for "-o 3 -r rip": the rel32 operand sits at offset 3.
-            const std::string spec = a.take().text;
-            if (const auto at = parse_number(spec)) {
-                offset += static_cast<int64_t>(*at);
-                resolve = resolve.empty() ? "rip" : resolve + ",rip";
-            } else {
-                resolve = resolve.empty() ? spec : resolve + "," + spec;
-            }
-        }
-        else if (flag == "-s")
-            msvc = true;
-        else
-            return false;
-        return true;
-    });
-    if (args.done())
-        throw Error("usage: find [flags] <aob | \"text\">");
-
-    const auto& first = args.tokens[args.next];
-    auto pattern = first.quoted ? (msvc ? Pattern::msvc_string(first.text) : Pattern::text(first.text))
-                                : Pattern::aob(args.rest());
-    if (offset)
-        pattern.add(offset);
-    apply_resolve_spec(pattern, resolve);
-    show({Scanner(target()).find(pattern, options)}, options);
-}
-
-void Session::cmd_findval(Args& args) {
-    auto options = scan_flags(args);
-    const std::string value = args.take().text;
-    const bool decimal_point = value.find('.') != std::string::npos;
-    const std::string type = args.done() ? (decimal_point ? "float" : "i32") : lower(args.take().text);
-
-    std::optional<Pattern> pattern;
-    if (type == "float" || type == "double") {
-        size_t used = 0;
-        const double number = std::stod(value, &used);
-        if (used != value.size())
-            throw Error("not a number: " + value);
-        pattern = type == "float" ? Pattern::value(static_cast<float>(number)) : Pattern::value(number);
-    } else {
-        static const std::pair<const char*, size_t> sizes[] = {
-            {"i8", 1}, {"u8", 1}, {"i16", 2}, {"u16", 2}, {"i32", 4}, {"u32", 4}, {"i64", 8}, {"u64", 8}};
-        const auto size = std::find_if(std::begin(sizes), std::end(sizes),
-                                       [&](const auto& entry) { return type == entry.first; });
-        if (size == std::end(sizes))
-            throw Error("unknown type " + type + " (i8 i16 i32 i64 u8 u16 u32 u64 float double)");
-        const auto number = parse_number(value);
-        if (!number)
-            throw Error("not a number: " + value);
-        pattern = Pattern::integer(*number, size->second);
+int Session::cmd_maps(Args& args) {
+    const size_t width = target().pointer_size();
+    const auto filter = args.rest();
+    size_t shown = 0;
+    for (const auto& r : target().regions()) {
+        if (!filter.empty() && !contains_ci(r.name, filter))
+            continue;
+        std::ostringstream line;
+        line << std::left << hex(r.base, width) << "  " << std::setw(9) << human_size(r.size) << ' '
+             << permissions(r) << "  " << r.name;
+        m_out.record(line.str(), {hex(r.base, width), std::to_string(r.size), permissions(r), r.name},
+                     {{"base", hex(r.base, width)}, {"size", r.size}, {"perms", permissions(r)}, {"name", r.name}});
+        ++shown;
     }
-    pattern->named(value + " " + type);
-    show({Scanner(target()).find(*pattern, options)}, options);
+    return shown ? 0 : 2;
 }
 
-void Session::cmd_refs(Args& args) {
-    auto options = scan_flags(args);
-    const auto address = static_cast<uintptr_t>(eval(args.rest()));
-    show({Scanner(target()).find_pointer(address, options)}, options);
+int Session::cmd_modules(Args& args) {
+    const size_t width = target().pointer_size();
+    const auto filter = args.rest();
+    size_t shown = 0;
+    for (const auto& m : target().modules()) {
+        if (!filter.empty() && !contains_ci(m.name, filter))
+            continue;
+        std::ostringstream line;
+        line << std::left << hex(m.base, width) << "  " << std::setw(9) << human_size(m.size) << ' ' << m.name;
+        m_out.record(line.str(), {hex(m.base, width), std::to_string(m.size), m.name},
+                     {{"base", hex(m.base, width)}, {"size", m.size}, {"name", m.name}});
+        ++shown;
+    }
+    return shown ? 0 : 2;
 }
 
-// --- profiles ------------------------------------------------------------
-
-void Session::cmd_load(Args& args) {
-    const auto path = args.done() ? std::string{} : (args.tokens[args.next].quoted ? args.tokens[args.next].text
-                                                                                  : std::string(args.rest()));
-    if (path.empty())
-        throw Error("usage: load <profile.json>");
-    m_profile = Profile::load(path);
-    m_out << "loaded " << m_profile->patterns.size() << " patterns"
-          << (m_profile->name.empty() ? "" : " from " + m_profile->name)
-          << (m_profile->module ? " for " + *m_profile->module : "") << '\n';
+int Session::cmd_vals(Args&) {
+    auto& out = m_out.text();
+    const size_t width = m_target ? m_target->pointer_size() : 8;
+    for (const auto& [name, value] : m_names)
+        out << "  $" << std::left << std::setw(12) << name << hex(value, width) << "  " << where(value) << '\n';
+    const size_t first = m_values.size() > 10 ? m_values.size() - 10 : 0;
+    for (size_t i = first; i < m_values.size(); ++i)
+        out << "  $" << std::left << std::setw(12) << (i + 1) << hex(m_values[i], width) << '\n';
+    if (m_names.empty() && m_values.empty())
+        out << "no values yet; every hit becomes $N, and $name = <expr> names one\n";
+    return 0;
 }
 
-void Session::cmd_check(Args& args) {
-    if (!m_profile)
-        throw Error("no profile, load one first");
-    auto options = scan_flags(args);
-    options.max = 100;
-    apply_profile_module(options, *m_profile, target());
-    const auto report = Scanner(target()).check(*m_profile, options);
-    print_check(m_out, report, target().pointer_size());
-
-    std::string labels;
-    for (const auto& check : report.patterns)
-        if (check.status == CheckStatus::Ok)
-            labels += "  " + remember(check.value) + " " + check.name + "\n";
-    if (!labels.empty())
-        m_out << '\n' << labels;
-}
-
-void Session::cmd_set(Args& args) {
+int Session::cmd_set(Args& args) {
     if (!args.done()) {
         const std::string key = args.take().text;
         const std::string value = args.take().text;
@@ -531,11 +509,13 @@ void Session::cmd_set(Args& args) {
         else
             throw Error("unknown setting " + key + " (max, parallel)");
     }
-    m_out << "max " << m_max << (m_max ? "" : " (unlimited)") << ", parallel " << (m_parallel ? "on" : "off") << '\n';
+    m_out.text() << "max " << m_max << (m_max ? "" : " (unlimited)") << ", parallel " << (m_parallel ? "on" : "off") << '\n';
+    return 0;
 }
 
-void Session::cmd_help(Args& args) {
+int Session::cmd_help(Args& args) {
     const auto& table = commands();
+    auto& out = m_out.text();
     if (!args.done()) {
         const std::string name = args.take().text;
         const auto command = std::find_if(table.begin(), table.end(), [&](const Command& c) {
@@ -543,14 +523,22 @@ void Session::cmd_help(Args& args) {
         });
         if (command == table.end())
             throw Error("no command " + name);
-        m_out << command->usage << "\n  " << command->summary << '\n';
+        out << command->usage << "\n  " << command->summary << '\n';
         if (*command->details)
-            m_out << '\n' << command->details << '\n';
-        return;
+            out << '\n' << command->details << '\n';
+        return 0;
     }
-    for (const auto& command : table)
-        m_out << "  " << std::left << std::setw(34) << command.usage << command.summary << '\n';
-    m_out << "\nhelp <command> shows details and examples.\n";
+    std::string group;
+    for (const auto& command : table) {
+        if (group != command.group) {
+            group = command.group;
+            out << (group == "target" ? "" : "\n") << group << '\n';
+        }
+        out << "  " << std::left << std::setw(36) << command.usage << command.summary << '\n';
+    }
+    out << "\n  $name = <expr>                      give a value a name\n"
+        << "\nhelp <command> has examples. In scripts, patty <target> <command> runs one.\n";
+    return 0;
 }
 
 } // namespace patty::cli

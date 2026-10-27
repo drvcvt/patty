@@ -1,12 +1,13 @@
 #pragma once
 
-#include "../commands.h"
+#include "../common.h"
+#include "../output.h"
 
 #include <patty/patty.h>
 
 #include <atomic>
 #include <functional>
-#include <iosfwd>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -15,25 +16,30 @@
 
 namespace patty::cli {
 
-// State and commands of one interactive session. Input handling (line
-// editing, history, Ctrl-C) lives in repl.cpp; this class only executes lines.
+// State and commands of a shell session. The same commands run interactively,
+// from a piped script and as `patty <target> <command>`. Input handling (line
+// editing, history, Ctrl-C) lives in repl.cpp.
 class Session {
 public:
-    explicit Session(std::ostream& out) : m_out(out) {}
+    // With `stdin_data`, an argument "-" means "the addresses on stdin".
+    explicit Session(Output& out, bool stdin_data = false) : m_out(out), m_stdin_data(stdin_data) {}
 
-    // Runs one line. Errors are printed, not thrown. Returns false on "quit".
-    bool execute(std::string_view line);
+    // Runs one line. Returns 0 when it worked and found something, 2 when it
+    // found nothing (or a check was not clean), 1 on errors. Errors are printed.
+    int execute(std::string_view line);
+    bool quit_requested() const { return m_quit; }
 
     // Throws patty::Error.
-    void open(const TargetArgs& args);
+    void open(const TargetArgs& args, bool announce = true);
 
     std::string prompt() const;
     bool has_target() const { return m_target != nullptr; }
     std::atomic_bool& cancel_flag() { return m_cancel; }
 
-    // For tab completion.
+    static bool is_command(std::string_view word);
     static std::vector<std::string> command_names();
-    std::vector<std::string> module_names();
+    // Module names and $names, for tab completion of expressions.
+    std::vector<std::string> completion_words();
 
     struct Token {
         std::string text;
@@ -48,15 +54,17 @@ public:
 
         bool done() const { return next >= tokens.size(); }
         const Token& take();
-        // The unconsumed rest of the line, verbatim (expressions may contain spaces).
+        // The unconsumed rest of the line, verbatim, or the text of a single
+        // quoted token (expressions may contain spaces either way).
         std::string_view rest() const;
     };
 
 private:
-    using Handler = void (Session::*)(Args&);
+    using Handler = int (Session::*)(Args&);
     struct Command {
         const char* name;
         const char* alias;
+        const char* group;
         const char* usage;
         const char* summary;
         const char* details;
@@ -64,52 +72,74 @@ private:
     };
     static const std::vector<Command>& commands();
 
-    // session.cpp
-    void cmd_help(Args& args);
-    void cmd_open(Args& args);
-    void cmd_ps(Args& args);
-    void cmd_proc(Args& args);
-    void cmd_file(Args& args);
-    void cmd_close(Args& args);
-    void cmd_info(Args& args);
-    void cmd_maps(Args& args);
-    void cmd_modules(Args& args);
-    void cmd_find(Args& args);
-    void cmd_findval(Args& args);
-    void cmd_refs(Args& args);
-    void cmd_load(Args& args);
-    void cmd_check(Args& args);
-    void cmd_set(Args& args);
+    // session.cpp: targets and the shell itself
+    int cmd_open(Args& args);
+    int cmd_ps(Args& args);
+    int cmd_close(Args& args);
+    int cmd_info(Args& args);
+    int cmd_maps(Args& args);
+    int cmd_modules(Args& args);
+    int cmd_vals(Args& args);
+    int cmd_set(Args& args);
+    int cmd_help(Args& args);
+    int assign(std::string_view name, std::string_view expression);
 
-    // session_memory.cpp
-    void cmd_examine(Args& args);
-    void cmd_print(Args& args);
-    void cmd_probe(Args& args);
-    void cmd_dump(Args& args);
+    // session_scan.cpp: searching and profiles
+    int cmd_find(Args& args);
+    int cmd_findval(Args& args);
+    int cmd_refs(Args& args);
+    int cmd_filter(Args& args);
+    int cmd_check(Args& args);
+
+    // session_memory.cpp: looking at memory
+    int cmd_read(Args& args);
+    int cmd_examine(Args& args);
+    int cmd_print(Args& args);
+    int cmd_probe(Args& args);
+    int cmd_dump(Args& args);
 
     Target& target();
     uint64_t eval(std::string_view expression);
+    // "-" -> every address on stdin, anything else -> one expression.
+    std::vector<Address> addresses(const Args& args);
+    struct InputLine {
+        Address address = 0;
+        std::string value;  // second column, if any
+    };
+    const std::vector<InputLine>& input();
     // Stores a value as the next $N and returns "$N".
-    std::string remember(uintptr_t value);
-    // "Game.exe+0x1A2B r-x .text" or "[heap] rw-"
-    std::string where(uintptr_t address);
-    // Same, with the lists passed in, so many lookups share one /proc read.
-    static std::string where(uintptr_t address, const std::vector<Module>& modules,
+    std::string remember(Address value);
+    // "Game.exe+0x1A2B r-x" or "rw- [heap]"
+    std::string where(Address address);
+    static std::string where(Address address, const std::vector<Module>& modules,
                              const std::vector<Region>& regions);
-    // Closest command name for typos, empty if nothing is close.
     static std::string suggest(std::string_view word);
-    // Consumes -c -d -m <module> -n <max> -p; other flags go to `extra`,
-    // which returns false for flags it does not know either.
+
+    // Consumes -c -d -m <module> -n <max>; other flags go to `extra`, which
+    // returns false for flags it does not know either.
     using FlagHandler = std::function<bool(const std::string& flag, Args& args)>;
     ScanOptions scan_flags(Args& args, const FlagHandler& extra = {});
-    void show(const std::vector<ScanResult>& results, const ScanOptions& options);
+    // Prints hits and makes them the set `filter` works on. `last` is what
+    // they held when found (the searched value), if known.
+    int show(const std::vector<ScanResult>& results, const ScanOptions& options,
+             const std::vector<uint8_t>& last = {});
 
-    std::ostream& m_out;
+    struct Hit {
+        Address address = 0;
+        std::vector<uint8_t> last;  // value at the last look, for changed/unchanged
+    };
+
+    Output& m_out;
+    bool m_stdin_data;
+    std::optional<std::vector<InputLine>> m_input;
     std::unique_ptr<Target> m_target;
-    std::vector<uintptr_t> m_values;
+    std::vector<Address> m_values;            // $1, $2, ...
+    std::map<std::string, Address> m_names;   // $player, ...
+    std::vector<Hit> m_hits;
     std::optional<Profile> m_profile;
     size_t m_max = 50;
     bool m_parallel = true;
+    bool m_quit = false;
     std::atomic_bool m_cancel{false};
 };
 

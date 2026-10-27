@@ -58,18 +58,6 @@ else()
 endif()
 
 if(PATTY_BUILD_CLI)
-    find_package(CLI11 2.4.2 CONFIG QUIET)
-    if(NOT CLI11_FOUND)
-        FetchContent_Declare(
-            cli11
-            GIT_REPOSITORY https://github.com/CLIUtils/CLI11.git
-            GIT_TAG        v2.4.2
-            GIT_SHALLOW    TRUE
-            GIT_SUBMODULES ""
-        )
-        FetchContent_MakeAvailable(cli11)
-    endif()
-
     # isocline: line editing, history and completion for the REPL (MIT, Linux + Windows).
     # SOURCE_SUBDIR points nowhere so only the sources are fetched; we build the one C file.
     enable_language(C)
@@ -136,17 +124,19 @@ patty_enable_warnings(patty)
 if(PATTY_BUILD_CLI)
     add_executable(patty_cli
         cli/main.cpp
-        cli/commands.cpp
+        cli/common.cpp
         cli/output.cpp
         cli/repl/expr.cpp
         cli/repl/repl.cpp
         cli/repl/session.cpp
         cli/repl/session_memory.cpp
+        cli/repl/session_scan.cpp
+        cli/repl/value_type.cpp
     )
     set_target_properties(patty_cli PROPERTIES OUTPUT_NAME patty)
     target_compile_features(patty_cli PRIVATE cxx_std_20)
     target_include_directories(patty_cli SYSTEM PRIVATE "${PATTY_NLOHMANN_JSON_INCLUDE_DIRS}")
-    target_link_libraries(patty_cli PRIVATE patty CLI11::CLI11 patty_isocline)
+    target_link_libraries(patty_cli PRIVATE patty patty_isocline)
     patty_enable_warnings(patty_cli)
 endif()
 
@@ -252,9 +242,8 @@ if(PATTY_BUILD_TESTS)
     if(PATTY_BUILD_CLI)
         set(PATTY_SMOKE_FIXTURE "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/patty-smoke.bin")
 
-        add_test(NAME patty_cli_scan_help COMMAND $<TARGET_FILE:patty_cli> scan --help)
-        add_test(NAME patty_cli_scan_value_help COMMAND $<TARGET_FILE:patty_cli> scan-value --help)
-        add_test(NAME patty_cli_probe_help COMMAND $<TARGET_FILE:patty_cli> probe --help)
+        add_test(NAME patty_cli_help COMMAND $<TARGET_FILE:patty_cli> --help)
+        add_test(NAME patty_cli_version COMMAND $<TARGET_FILE:patty_cli> --version)
 
         find_package(Python3 COMPONENTS Interpreter QUIET)
         if(Python3_Interpreter_FOUND)
@@ -263,8 +252,8 @@ if(PATTY_BUILD_TESTS)
                 COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/repl_smoke.py ${PATTY_SMOKE_FIXTURE} $<TARGET_FILE:patty_cli>
             )
             add_test(
-                NAME patty_cli_json_smoke
-                COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_smoke.py ${PATTY_SMOKE_FIXTURE} $<TARGET_FILE:patty_cli>
+                NAME patty_pipe_smoke
+                COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/pipe_smoke.py ${PATTY_SMOKE_FIXTURE} $<TARGET_FILE:patty_cli>
             )
 
             # The MCP server runs from its own venv (mcp/.venv) when present.
