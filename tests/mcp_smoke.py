@@ -1,32 +1,30 @@
+"""The MCP tools against the smoke fixture."""
 import importlib.util
-import json
 import os
 import sys
 from pathlib import Path
 
 fixture = Path(sys.argv[1])
-patty_exe = Path(sys.argv[2])
-os.environ['PATTY_EXE'] = str(patty_exe)
+os.environ['PATTY_EXE'] = sys.argv[2]
 
-spec = importlib.util.spec_from_file_location('patty_mcp', Path('mcp/server.py'))
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
+spec = importlib.util.spec_from_file_location('patty_mcp', Path(__file__).resolve().parent.parent / 'mcp' / 'server.py')
+server = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(server)
 
-value = json.loads(module.scan_value(value='0xC0FFEE', value_size=3, file_path=str(fixture)))
-assert value['results'][0]['count'] == 1, value
+hits = server.findval(str(fixture), '0x40', 'u64')
+assert hits['exit'] == 0 and [h['address'] for h in hits['items']] == ['0x0000000000000020', '0x0000000000000028'], hits
 
-pointer = json.loads(module.scan_pointer(target='0x40', file_path=str(fixture)))
-assert pointer['results'][0]['count'] == 2, pointer
+text = server.find(str(fixture), 'Hello World')
+assert text['items'][0]['value'] == '0x0000000000000050', text
 
-pointers32 = json.loads(module.scan_pointers(targets=['0x1234'], file_path=str(fixture), pointer_size=4))
-assert pointers32['results'][0]['count'] == 1, pointers32
+value = server.read(str(fixture), 'str', '0x50')
+assert value['items'][0]['value'] == 'Hello World', value
 
-probe = json.loads(module.probe_object(address='0x0', file_path=str(fixture), max_size=0x20))
-assert probe['probed_size'] == 32, probe
+checked = server.check(str(fixture), str(fixture.with_name('patty-smoke.profile.json')))
+assert checked['exit'] == 2 and [i['status'] for i in checked['items']] == ['ok', 'ambiguous', 'missing'], checked
 
-regions = json.loads(module.list_regions(file_path=str(fixture)))
-assert isinstance(regions, list) and regions, regions
-check = json.loads(module.check_profile(profile_path=str(fixture.with_name('patty-smoke.profile.json')),
-                                        file_path=str(fixture)))
-assert check['summary'] == {'ok': 1, 'ambiguous': 1, 'missing': 1, 'unresolved': 0}, check
+anything = server.command(str(fixture), 'p [0x20]+0x10')
+assert anything['items'][0]['value'] == '0x0000000000000050', anything
+
+assert server.maps(str(fixture))['items'], 'no regions'
 print('mcp-smoke-ok')

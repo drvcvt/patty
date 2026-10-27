@@ -1,8 +1,8 @@
 # patty MCP server (optional)
 
 [FastMCP](https://gofastmcp.com) server so Claude Code or other MCP clients can
-use patty. Not needed for anything else. It just calls the `patty` binary and
-passes the JSON through.
+use patty. Not needed for anything else. Each tool runs
+`patty --json <target> <command>` and returns `{exit, items, log}`.
 
 ## Setup
 
@@ -36,12 +36,9 @@ across rebuilds (`build/patty` doesn't).
 
 ## Tools
 
-`scan_process`, `scan_process_by_pid`, `scan_file`, `multi_scan_process`,
-`multi_scan_file`, `scan_with_profile`, `check_profile`, `scan_value`,
-`scan_pointer`, `scan_pointers`, `find_string_references`, `probe_object`,
-`list_regions`, `dump_memory`.
-
-`check_profile` runs a profile against a target, same as `patty check`.
+The same names as the shell commands: `ps`, `find`, `findval`, `refs`, `read`,
+`probe`, `maps`, `modules`, `check`, plus `command` for any other shell line
+(`x/8xg ...`, `filter i32 == 90`). A target is a process name, pid or file.
 
 ## Tests
 
