@@ -142,8 +142,9 @@ if (( want_mcp )); then
 fi
 cat <<EOF
 
-  patty                         interactive shell
-  patty list --name <process>   regions of a running process
+  patty <process|pid|file>      open it in the shell
+  patty ps                      list processes
+  TUTORIAL.md                   ten minutes with a toy game, no sudo needed
   find_package(patty)           in CMake, with CMAKE_PREFIX_PATH=$prefix
 
 EOF

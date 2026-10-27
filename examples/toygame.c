@@ -1,7 +1,7 @@
 // A tiny "game" to practise on. TUTORIAL.md walks through it.
 //
 //   gcc -O1 -o toygame examples/toygame.c && ./toygame &
-//   patty repl --name toygame
+//   patty toygame
 //
 // Build with -DPATCH to get "version 1.1": a new field in Player and a new
 // global, the kind of change that moves offsets around in a real update.

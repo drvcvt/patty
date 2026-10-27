@@ -88,7 +88,7 @@ dash (`'ld-linux-x86-64.so.2'`).
 </details>
 
 Tab completion, history in `~/.local/state/patty/history`, Ctrl-C cancels a
-scan, Ctrl-D twice quits. You can pipe a file of commands into `patty repl`.
+scan, Ctrl-D twice quits. Piping works too: `patty Game.exe < steps.txt` runs the commands in the file.
 
 ## CLI
 
