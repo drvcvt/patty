@@ -7,17 +7,19 @@ Read-only. On Linux it only uses `process_vm_readv`: no ptrace attach, nothing
 gets stopped, no `/proc/<pid>/mem`.
 
 ```text
-patty toygame:2029764> find -c -m toygame -o 3 -r rip 48 8B 05 ?? ?? ?? ?? 66 0F EF C0 48 85 C0
-Scanned 4 KB in 0.2 ms
+$ patty toygame
+opened pid 2281406 (toygame)
+patty toygame:2281406> find -c -m toygame -r 3 48 8B 05 ?? ?? ?? ?? 66 0F EF C0 48 85 C0
+Scanned 4 KB in 0.1 ms
 
 1 match
-  $6    0x000055BAD5B451ED -> 0x000055BAD5B48020  toygame
-patty toygame:2029764> x/s [[$6]+8]
-0x000055BAD5B4600A  "PlayerOne"
-patty toygame:2029764> p [[$6]+0x10]
-$7 = 0x000055BB1243E010  rw- [heap]
-patty toygame:2029764> x/fw $
-0x000055BB1243E010  40
+  $5    0x00005631B5AA21ED -> 0x00005631B5AA5020  toygame+0x11ED r-x
+patty toygame:2281406> x/s [[$5]+8]
+0x00005631B5AA300A  "PlayerOne"
+patty toygame:2281406> p [[$5]+0x10]
+$6 = 0x00005631D081E010  rw- [heap]
+patty toygame:2281406> x/fw $
+0x00005631D081E010  40
 ```
 
 ## Install
@@ -53,11 +55,12 @@ no game or sudo needed.
 ## Shell
 
 ```bash
-patty                        # then: proc Game.exe / file Game.exe
-patty repl --name Game.exe   # or --pid / --file
+patty Game.exe      # process name, pid or a file, whatever you give it
+patty               # empty shell; then `ps` and `open <pid|name|file>`
 ```
 
-Results get numbered like in gdb: `$1`, `$2`, `$` is the last one.
+Results get numbered like in gdb: `$1`, `$2`, `$` is the last one, and every
+hit shows where it is (`Game.exe+0x11ED r-x`, `rw- [heap]`).
 Expressions work anywhere an address goes: `Game.exe+0x2A4F10`, `[$1]+0x18`
 (brackets read a pointer), `0x` for hex, quotes around module names with a
 dash (`'ld-linux-x86-64.so.2'`).
@@ -67,10 +70,10 @@ dash (`'ld-linux-x86-64.so.2'`).
 
 | | |
 |---|---|
-| `proc <pid\|name>` | open a process |
-| `file [-raw] <path>` | open a PE, ELF or raw dump |
+| `open [-raw] <pid\|name\|file>` | open a process or a binary/dump |
+| `ps [text]` | list processes |
 | `info`, `maps [text]`, `modules [text]` | what's loaded where |
-| `find [-c] [-d] [-m mod] [-n max] [-o n] [-r rip,deref,add:8] <aob \| "text">` | sig or string search |
+| `find [-c] [-d] [-m mod] [-n max] [-r 3] <aob \| "text">` | sig or string search, `-r 3` follows a rip operand at byte 3 |
 | `findval <value> [i8..u64\|float\|double]` | number search |
 | `refs <expr>` | pointers to an address |
 | `x[/NFU] <expr>` | examine memory like gdb (`x d u f a s c`, `b h w g`) |
@@ -98,6 +101,7 @@ patty scan-pointer --name Game.exe --address 0x7FF6A0010000
 patty probe --name Game.exe --address 0x1D2E4C80
 patty list  --name Game.exe --modules
 patty dump  --name Game.exe --address 0x7FF6A0010000 --size 0x1000 -o text.bin
+patty ps steam
 ```
 
 `-o json` for scripts. Exit code 0 = found, 2 = nothing found (or `check` not
@@ -151,39 +155,58 @@ target_link_libraries(my_tool PRIVATE patty::patty)
 ```cpp
 #include <patty/patty.h>
 #include <cstdio>
+#include <format>
 
-int main() {
-    try {
-        auto game = patty::Process::open("toygame");
-        patty::Scanner scan{game};
+using namespace patty::literals;
 
-        // mov rax, [rip+g_local] ; pxor xmm0, xmm0 ; test rax, rax
-        auto local = patty::Pattern::aob("48 8B 05 ?? ?? ?? ?? 66 0F EF C0 48 85 C0").rip(3);
-        auto hits = scan.find(local, {.module = "toygame", .code_only = true});
-        if (hits.size() != 1) {
-            std::puts("signature broke, time to update it");
-            return 1;
-        }
+// How toygame lays out a player. Remote<T> is a pointer that lives in the game.
+struct Player {
+    float health;
+    int level;
+    patty::Remote<char> name;
+    patty::Remote<Player> target;
+};
 
-        uintptr_t player = game.read_pointer(hits[0].value()).value_or(0);
-        float health = game.read<float>(player).value_or(0);
-        auto name = game.read_string(game.read_pointer(player + 0x8).value_or(0));
-        std::printf("%s has %.1f hp\n", name.value_or("?").c_str(), health);
+int main() try {
+    auto game = patty::Process::open("toygame");
+    patty::Scanner scan{game};
 
-        // Same walk as a pointer chain: [[global] + 0x10] is the target, +0 its health.
-        if (auto enemy = patty::pointer_chain(game, hits[0].value(), {0, 0x10, 0}))
-            std::printf("target has %.1f hp\n", game.read<float>(*enemy).value_or(0));
-    } catch (const patty::Error& e) {
-        std::fprintf(stderr, "patty: %s\n", e.what());
+    // mov rax, [rip+g_local] ; pxor xmm0, xmm0 ; test rax, rax
+    auto hits = scan.find("48 8B 05 ?? ?? ?? ?? 66 0F EF C0 48 85 C0"_sig.rip(3), {.module = "toygame"});
+    if (hits.size() != 1) {
+        std::puts("signature broke, time to update it");
         return 1;
     }
+
+    auto local = game.read(hits[0].as<patty::Remote<Player>>()).value();
+    auto player = game.read(local).value();
+    std::puts(std::format("{} at {:#x}: {} hp, level {}", game.read_string(player.name).value_or("?"),
+                          local, player.health, player.level).c_str());
+
+    if (auto hp = game.read(local, &Player::target, &Player::health))
+        std::puts(std::format("its target has {} hp", *hp).c_str());
+} catch (const std::exception& e) {
+    std::fprintf(stderr, "%s\n", e.what());
+    return 1;
 }
 ```
 
 ```text
-PlayerOne has 87.5 hp
-target has 40.0 hp
+PlayerOne at 0x555df1f9c030: 87.5 hp, level 12
+its target has 40 hp
 ```
+
+What's going on there:
+
+- `Remote<T>` is a pointer that lives in the target. It has the target's
+  pointer size, so you can put it straight into the structs you read, and
+  `game.read(remote)` gives you an `optional<T>`.
+- `game.read(local, &Player::target, &Player::health)` walks the members:
+  read `local`, follow `target`, read `health`. Null on the way means empty
+  optional, not a crash.
+- `"..."_sig` is checked while compiling. `"48 8G"_sig` doesn't build.
+- `find_value(87.5f)` searches for any trivially copyable value,
+  `read_array<T>(addr, n)` reads n of them, `std::format("{:#x}", remote)` works.
 
 Opening a target and parsing patterns/profiles throw `patty::Error`. Reads
 don't throw, they return `bool` / `std::optional`. `Scanner` only borrows the
@@ -195,11 +218,13 @@ target. Want to scan something else (dumps, remote memory, DMA)? Subclass
 
 | | |
 |---|---|
-| `Process` | `open(pid)`, `open("Game.exe")`, `current()`, `find(name)` |
+| types | `Address`, `Remote<T>` / `Remote32<T>`, concept `Readable`, `offset_of(&T::m)` |
+| `Process` | `open(pid)`, `open("Game.exe")`, `current()`, `find(name)`, `list()` |
 | `Image` | `open(path)`, `open_raw(path, base)`, `from_bytes(bytes, base)` |
-| `Target` | `read<T>`, `read_pointer`, `read_string`, `read_bytes`, `view`, `regions`, `modules`, `module(name)`, `region_at` |
-| `Pattern` | `aob`, `text`, `raw`, `integer`, `value`, `msvc_string`; `.rip(n)` `.deref()` `.add(n)` `.named(s)` |
-| `Scanner` | `find`, `find_pointer(s)`, `probe`, `check` |
+| `Target` | `read<T>(addr)`, `read(remote)`, `read(remote, &T::a, &U::b...)`, `read_array<T>`, `read_string`, `read_pointer`, `view`, `regions`, `modules`, `module(name)` |
+| `Pattern` | `"..."_sig`, `aob`, `text`, `raw`, `integer`, `value`, `msvc_string`; `.rip(n)` `.deref()` `.add(n)` `.named(s)` |
+| `Scanner` | `find(sig)`, `find({a, b})`, `find_value(v)`, `find_pointer(s)`, `probe`, `check` |
+| `Match` | `address`, `resolved`, `value()`, `as<T>()` |
 | `ScanOptions` | `module`, `code_only`, `data_only`, `max`, `parallel`, `threads`, `filter`, `cancel` |
 | `Profile` | `load`, `parse` |
 | | `pointer_chain`, `rip_relative`, `resolve` |
